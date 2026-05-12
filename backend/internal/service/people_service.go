@@ -31,7 +31,8 @@ const (
 	defaultLinkThreshold       = 0.62
 	defaultAttachThreshold     = 0.65
 	peopleMinClusterFaces      = 2
-	peopleFeedbackPollInterval = 250 * time.Millisecond
+	peopleFeedbackPollInterval   = 250 * time.Millisecond
+	peopleFeedbackZeroResultWait = 30 * time.Second // cooldown after zero-result recluster
 	peopleStatsCacheTTL        = 30 * time.Second
 
 	// confirmedPersonDiscount lowers the attach threshold for persons with manual-locked faces,
@@ -117,6 +118,7 @@ type peopleService struct {
 	feedbackShutdown      bool
 	feedbackStopCh        chan struct{}
 	feedbackPollInterval  time.Duration
+	feedbackCooldown      time.Duration
 	feedbackReclusterHook func() model.ReclusterResult
 	mergeSuggestionDirty  func(string) error
 
@@ -1405,6 +1407,14 @@ func (s *peopleService) runFeedbackReclusterLoop() {
 		}
 		logger.Infof("feedback recluster complete: evaluated=%d reassigned=%d iterations=%d elapsed=%s",
 			result.Evaluated, result.Reassigned, result.Iterations, time.Since(startedAt).Round(time.Millisecond))
+
+		// Cooldown after zero-result recluster to prevent CPU spin
+		if result.Reassigned == 0 {
+			if s.waitFeedbackCooldownOrStop(s.feedbackCooldownValue()) {
+				s.markFeedbackLoopStopped()
+				return
+			}
+		}
 	}
 }
 
@@ -1458,6 +1468,27 @@ func (s *peopleService) waitFeedbackPollIntervalOrStop() bool {
 	}
 }
 
+// waitFeedbackCooldownOrStop waits for the given duration or returns if stop is requested.
+// Returns true if stop was requested (caller should exit), false if the cooldown elapsed.
+func (s *peopleService) waitFeedbackCooldownOrStop(cooldown time.Duration) bool {
+	s.feedbackMu.Lock()
+	stopCh := s.feedbackStopCh
+	s.feedbackMu.Unlock()
+	if stopCh == nil {
+		return true
+	}
+
+	timer := time.NewTimer(cooldown)
+	defer timer.Stop()
+
+	select {
+	case <-stopCh:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (s *peopleService) markFeedbackLoopStopped() {
 	s.feedbackMu.Lock()
 	defer s.feedbackMu.Unlock()
@@ -1480,6 +1511,15 @@ func (s *peopleService) feedbackReclusterPollIntervalValue() time.Duration {
 	return s.feedbackPollInterval
 }
 
+func (s *peopleService) feedbackCooldownValue() time.Duration {
+	s.feedbackMu.Lock()
+	defer s.feedbackMu.Unlock()
+	if s.feedbackCooldown <= 0 {
+		return peopleFeedbackZeroResultWait
+	}
+	return s.feedbackCooldown
+}
+
 func (s *peopleService) setFeedbackReclusterHookForTest(hook func() model.ReclusterResult) {
 	s.feedbackMu.Lock()
 	defer s.feedbackMu.Unlock()
@@ -1490,6 +1530,12 @@ func (s *peopleService) setFeedbackReclusterPollIntervalForTest(interval time.Du
 	s.feedbackMu.Lock()
 	defer s.feedbackMu.Unlock()
 	s.feedbackPollInterval = interval
+}
+
+func (s *peopleService) setFeedbackCooldownForTest(d time.Duration) {
+	s.feedbackMu.Lock()
+	defer s.feedbackMu.Unlock()
+	s.feedbackCooldown = d
 }
 
 func (s *peopleService) setMergeSuggestionDirtyHookForTest(hook func(string) error) {
@@ -2399,7 +2445,7 @@ func (s *peopleService) triggerRecluster() model.ReclusterResult {
 		}
 	}
 
-	if result.Evaluated > 0 || result.Reassigned > 0 || len(affectedPersonIDs) > 0 || len(affectedPhotoIDs) > 0 {
+	if result.Reassigned > 0 || len(affectedPersonIDs) > 0 || len(affectedPhotoIDs) > 0 {
 		s.markMergeSuggestionsDirty("trigger_recluster")
 	}
 

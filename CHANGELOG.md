@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.7] - 2026-05-12
+
+### Fixed
+- **Feedback recluster 空转导致 CPU 100%** — feedback recluster 循环在零结果时无冷却机制，每 ~10 秒重复执行无用计算。修复：零结果时增加 30 秒冷却；`triggerRecluster()` 仅在实际产生重新分配时才标记合并建议为脏数据
+
+---
+
 ## [1.6.6] - 2026-05-12
 
 ### Fixed

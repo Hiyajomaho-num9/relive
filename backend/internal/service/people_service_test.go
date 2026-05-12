@@ -2200,6 +2200,7 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
 		setFeedbackReclusterPollIntervalForTest(time.Duration)
+		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
 
@@ -2210,6 +2211,7 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	firstRunStarted := make(chan struct{}, 1)
 	releaseFirstRun := make(chan struct{})
 	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
+	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		run := runs.Add(1)
 		if run == 1 {
@@ -2255,6 +2257,7 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
 		setFeedbackReclusterPollIntervalForTest(time.Duration)
+		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
 
@@ -2263,6 +2266,7 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 
 	var runs atomic.Int32
 	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
+	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
 		return model.ReclusterResult{Evaluated: 1}
@@ -2290,6 +2294,7 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
 		setFeedbackReclusterPollIntervalForTest(time.Duration)
+		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
 
@@ -2298,6 +2303,7 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 
 	var runs atomic.Int32
 	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
+	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
 		return model.ReclusterResult{Evaluated: 1}
