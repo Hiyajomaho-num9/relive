@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.5] - 2026-05-12
+
+### Performance
+- **WriteQueue 读写分离** — 新增 `WriteQueue` 序列化所有 SQLite 写操作，从根本上解决 "database is locked" 错误。六个 service（thumbnail/geocode/people/scheduler/display/clustering）全部接入，移除旧的 retry 逻辑
+- **后台 DB 连接池独立** — 合并建议后台任务使用专用连接池，不再与 API 争用连接
+- **后台连接池缩减为 1** — 减少 SQLite 并发争用，WriteQueue 已保证写串行
+- **ANN 索引重建自适应 CPU 节流** — 分批插入 + 按 CPU 占空比休眠，防止 NAS 上 HNSW 构建占满 CPU
+- **照片列表页加载优化** — 查询性能提升
+- **合并建议后台任务优化** — 减少磁盘抖动
+- **消除内存分页和全表加载** — display service 内存优化
+
+### Added
+- **WriteQueue** — SQLite 写操作串行化队列，支持同步 `Execute` 和异步 `Enqueue` 两种模式
+- **手动人脸检测按钮** — 照片详情页支持手动触发人脸检测
+
+### Fixed
+- **WriteQueue 可重入死锁** — scheduler 外层 `writeQueue.Execute` 包裹内层已使用 `executeWrite` 的方法，`sync.Mutex` 不可重入导致永久死锁，所有 HTTP 写操作超时
+- **peopleService.executeWrite 无限递归** — `s.executeWrite(fn)` 自调用而非 `s.writeQueue.Execute(fn)`，栈溢出
+- **eventClusteringService.executeWrite 同款 bug** — 同上
+- **合并建议 ANN 索引陈旧候选过滤** — 已删除人物仍出现在合并候选中
+- **executeMergeJob 双重 writeGate 锁** — 死锁
+- **启动时卡住的 merge job 恢复** — 防止重启后任务永远卡在 running 状态
+
+---
+
 ## [1.6.4] - 2026-04-24
 
 ### Performance
