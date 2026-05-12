@@ -11,6 +11,7 @@ import (
 	"github.com/davidhoo/relive/internal/repository"
 	"github.com/davidhoo/relive/internal/util"
 	"github.com/davidhoo/relive/pkg/config"
+	"github.com/davidhoo/relive/pkg/database"
 	"github.com/davidhoo/relive/pkg/logger"
 	"gorm.io/gorm"
 )
@@ -34,11 +35,12 @@ type ThumbnailService interface {
 }
 
 type thumbnailService struct {
-	db        *gorm.DB
-	photoRepo repository.PhotoRepository
-	jobRepo   repository.ThumbnailJobRepository
-	config    *config.Config
-	generator *util.ThumbnailGenerator
+	db         *gorm.DB
+	photoRepo  repository.PhotoRepository
+	jobRepo    repository.ThumbnailJobRepository
+	config     *config.Config
+	generator  *util.ThumbnailGenerator
+	writeQueue *database.WriteQueue
 
 	taskMutex       sync.RWMutex
 	task            *model.ThumbnailTask
@@ -56,11 +58,12 @@ type activeThumbnailTask struct {
 
 func NewThumbnailService(db *gorm.DB, photoRepo repository.PhotoRepository, jobRepo repository.ThumbnailJobRepository, cfg *config.Config) ThumbnailService {
 	return &thumbnailService{
-		db:        db,
-		photoRepo: photoRepo,
-		jobRepo:   jobRepo,
-		config:    cfg,
-		generator: util.NewThumbnailGenerator(1024, 1024, 90, cfg.Photos.ThumbnailPath),
+		db:         db,
+		photoRepo:  photoRepo,
+		jobRepo:    jobRepo,
+		config:     cfg,
+		generator:  util.NewThumbnailGenerator(1024, 1024, 90, cfg.Photos.ThumbnailPath),
+		writeQueue: database.GetWriteQueue(),
 	}
 }
 
@@ -449,41 +452,24 @@ func (s *thumbnailService) processJob(job *model.ThumbnailJob) error {
 	return nil
 }
 
-// updatePhotoWithRetry 带重试机制的 photo 更新
+// updatePhotoWithRetry uses WriteQueue to serialize DB writes
 func (s *thumbnailService) updatePhotoWithRetry(photoID uint, updates map[string]interface{}) error {
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		err := s.photoRepo.UpdateFields(photoID, updates)
-		if err == nil {
-			return nil
-		}
-		// 检查是否是数据库锁定错误
-		if isSQLiteLockError(err) {
-			lastErr = err
-			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
-			continue
-		}
-		return err
+	if s.writeQueue == nil {
+		return s.photoRepo.UpdateFields(photoID, updates)
 	}
-	return lastErr
+	return s.writeQueue.Execute(func() error {
+		return s.photoRepo.UpdateFields(photoID, updates)
+	})
 }
 
-// updateJobWithRetry 带重试机制的 job 更新
+// updateJobWithRetry uses WriteQueue to serialize DB writes
 func (s *thumbnailService) updateJobWithRetry(jobID uint, updates map[string]interface{}) error {
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		err := s.jobRepo.UpdateFields(jobID, updates)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if isSQLiteLockError(err) {
-			time.Sleep(time.Duration(i+1) * 50 * time.Millisecond)
-			continue
-		}
-		return err
+	if s.writeQueue == nil {
+		return s.jobRepo.UpdateFields(jobID, updates)
 	}
-	return lastErr
+	return s.writeQueue.Execute(func() error {
+		return s.jobRepo.UpdateFields(jobID, updates)
+	})
 }
 
 // isSQLiteLockError 检查错误是否是 SQLite 锁定错误
