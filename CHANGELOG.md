@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.8] - 2026-05-12
+
+### Fixed
+- **聚类内层循环空转导致 CPU 100%** — `runIncrementalClustering` 在 `markComponentPending` 路径上错误地将 photo IDs 加入 `affectedPhotoIDs`，导致 `processPendingFaces()` 返回 `hasMore=true`，内层循环无限重复处理同一批无法归类的 faces 而无日志输出。修复：移除 `markComponentPending` 路径的 `affectedPhotoIDs` 添加，并增加连续无进展检测（3 次不减少 pending 数则跳出循环）
+
+---
+
 ## [1.6.7] - 2026-05-12
 
 ### Fixed

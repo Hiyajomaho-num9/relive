@@ -430,6 +430,9 @@ fi
 
 ## 更新日志
 
+### v1.6.8 (2026-05-12)
+- ✅ 修复聚类内层循环空转（markComponentPending 误报 hasMore）导致 CPU 100%
+
 ### v1.6.7 (2026-05-12)
 - ✅ Feedback recluster 零结果冷却机制，防止 CPU 空转 100%
 - ✅ triggerRecluster 仅在实际重新分配时标记合并建议脏数据

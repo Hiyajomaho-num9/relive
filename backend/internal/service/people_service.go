@@ -1000,6 +1000,7 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 		s.idleCount = 0
 		s.setTaskState(model.TaskStatusRunning, "clustering",
 			fmt.Sprintf("正在处理 %d 张待聚类人脸", pendingFaceStats.Total), nil)
+		noProgressCount := 0
 		for {
 			active.mu.Lock()
 			stopRequested := active.stop
@@ -1021,6 +1022,20 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 			if !hasMore {
 				break
 			}
+
+			// Check if pending count is actually decreasing; if not, break out
+			// to prevent spinning on stuck faces.
+			currentStats, _ := s.faceRepo.GetPendingStats()
+			if currentStats.Total >= pendingFaceStats.Total {
+				noProgressCount++
+				if noProgressCount >= 3 {
+					break
+				}
+			} else {
+				noProgressCount = 0
+				pendingFaceStats = currentStats
+			}
+
 			time.Sleep(s.clusteringInterval())
 		}
 	}
@@ -2335,9 +2350,10 @@ func (s *peopleService) runIncrementalClustering() ([]uint, []uint, error) {
 		if err := s.markComponentPending(component, componentScore); err != nil {
 			return nil, nil, err
 		}
-		for _, photoID := range facePhotoIDs(component) {
-			affectedPhotoIDs[photoID] = struct{}{}
-		}
+		// Do NOT add affectedPhotoIDs for markComponentPending — these faces
+		// were already pending and just got retry_count+1. Adding them would
+		// cause processPendingFaces to return hasMore=true, spinning the inner
+		// loop on the same stale faces indefinitely.
 	}
 
 	return mapKeys(affectedPersonIDs), mapKeys(affectedPhotoIDs), nil
