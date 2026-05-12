@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/davidhoo/relive/pkg/logger"
 )
 
 // WriteOp represents a single write operation to be executed.
@@ -30,7 +32,9 @@ type WriteQueue struct {
 	batchSize     int
 	flushInterval time.Duration
 	batchFlushFn  BatchFlushFn
+	batchFnMu     sync.RWMutex
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 	wg            sync.WaitGroup
 	executedCount uint64
 	enqueuedCount uint64
@@ -38,11 +42,16 @@ type WriteQueue struct {
 }
 
 // globalWriteQueue is the singleton instance.
-var globalWriteQueue *WriteQueue
+var (
+	globalWriteQueue *WriteQueue
+	writeQueueOnce   sync.Once
+)
 
 // InitWriteQueue creates the global WriteQueue with default config and starts it.
 func InitWriteQueue() *WriteQueue {
-	globalWriteQueue = NewWriteQueue(nil)
+	writeQueueOnce.Do(func() {
+		globalWriteQueue = NewWriteQueue(nil)
+	})
 	return globalWriteQueue
 }
 
@@ -66,7 +75,7 @@ func NewWriteQueue(cfg *WriteQueueConfig) *WriteQueue {
 	}
 
 	wq := &WriteQueue{
-		queue:         make(chan WriteOp, batchSize*2),
+		queue:         make(chan WriteOp, batchSize*4),
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		stopCh:        make(chan struct{}),
@@ -80,6 +89,8 @@ func NewWriteQueue(cfg *WriteQueueConfig) *WriteQueue {
 
 // SetBatchFlushFn injects the function used to execute batched operations.
 func (wq *WriteQueue) SetBatchFlushFn(fn BatchFlushFn) {
+	wq.batchFnMu.Lock()
+	defer wq.batchFnMu.Unlock()
 	wq.batchFlushFn = fn
 }
 
@@ -95,7 +106,11 @@ func (wq *WriteQueue) Execute(fn func() error) error {
 // Enqueue pushes fn into the async write queue for batched execution.
 func (wq *WriteQueue) Enqueue(fn func() error) {
 	atomic.AddUint64(&wq.enqueuedCount, 1)
-	wq.queue <- WriteOp{Fn: fn}
+	select {
+	case wq.queue <- WriteOp{Fn: fn}:
+	default:
+		logger.Warnf("[WriteQueue] queue full, dropping write op")
+	}
 }
 
 // runBatchWriter consumes from the queue, batching by size or timer.
@@ -117,7 +132,8 @@ func (wq *WriteQueue) runBatchWriter() {
 				ticker.Reset(wq.flushInterval)
 			} else {
 				// Drain remaining from channel (non-blocking)
-				for {
+				draining := true
+				for draining {
 					select {
 					case op := <-wq.queue:
 						batch = append(batch, op)
@@ -127,10 +143,9 @@ func (wq *WriteQueue) runBatchWriter() {
 							ticker.Reset(wq.flushInterval)
 						}
 					default:
-						goto doneDraining
+						draining = false
 					}
 				}
-			doneDraining:
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
@@ -139,15 +154,15 @@ func (wq *WriteQueue) runBatchWriter() {
 			}
 		case <-wq.stopCh:
 			// Drain remaining from queue
-			for {
+			draining := true
+			for draining {
 				select {
 				case op := <-wq.queue:
 					batch = append(batch, op)
 				default:
-					goto doneStop
+					draining = false
 				}
 			}
-		doneStop:
 			if len(batch) > 0 {
 				wq.flushBatch(batch)
 			}
@@ -168,18 +183,26 @@ func (wq *WriteQueue) flushBatch(ops []WriteOp) {
 
 	atomic.AddUint64(&wq.batchCount, 1)
 
-	if wq.batchFlushFn != nil {
-		_ = wq.batchFlushFn(ops)
+	wq.batchFnMu.RLock()
+	fn := wq.batchFlushFn
+	wq.batchFnMu.RUnlock()
+
+	if fn != nil {
+		if err := fn(ops); err != nil {
+			logger.Errorf("[WriteQueue] batch flush error: %v", err)
+		}
 	} else {
 		for _, op := range ops {
-			_ = op.Fn()
+			if err := op.Fn(); err != nil {
+				logger.Errorf("[WriteQueue] op execution error: %v", err)
+			}
 		}
 	}
 }
 
 // Stop gracefully shuts down the WriteQueue, draining remaining operations.
 func (wq *WriteQueue) Stop() {
-	close(wq.stopCh)
+	wq.stopOnce.Do(func() { close(wq.stopCh) })
 	wq.wg.Wait()
 }
 
