@@ -72,7 +72,7 @@ func NewEventClusteringService(db *gorm.DB, photoRepo repository.PhotoRepository
 // executeWrite runs fn through WriteQueue if available, otherwise directly.
 func (s *eventClusteringService) executeWrite(fn func() error) error {
 	if s.writeQueue != nil {
-		return s.executeWrite(fn)
+		return s.writeQueue.Execute(fn)
 	}
 	return fn()
 }

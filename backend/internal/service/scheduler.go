@@ -129,14 +129,9 @@ func (s *TaskScheduler) cleanExpiredLocksTask() {
 func (s *TaskScheduler) cleanExpiredLocks() {
 	var count int64
 	var err error
-	if s.writeQueue != nil {
-		err = s.writeQueue.Execute(func() error {
-			count, err = s.analysisService.CleanExpiredLocks()
-			return err
-		})
-	} else {
-		count, err = s.analysisService.CleanExpiredLocks()
-	}
+	// Note: analysisService.CleanExpiredLocks() already uses writeQueue internally;
+	// wrapping it here would cause a re-entrant mutex deadlock (sync.Mutex is not re-entrant).
+	count, err = s.analysisService.CleanExpiredLocks()
 	if err != nil {
 		logger.Errorf("Failed to clean expired locks: %v", err)
 		return
@@ -215,17 +210,10 @@ func (s *TaskScheduler) ensureTodayDailyBatch() {
 	if s.displayService == nil {
 		return
 	}
-	if s.writeQueue != nil {
-		if err := s.writeQueue.Execute(func() error {
-			_, err := s.displayService.GenerateDailyBatch(time.Now(), false)
-			return err
-		}); err != nil {
-			logger.Warnf("Failed to ensure daily display batch: %v", err)
-		}
-	} else {
-		if _, err := s.displayService.GenerateDailyBatch(time.Now(), false); err != nil {
-			logger.Warnf("Failed to ensure daily display batch: %v", err)
-		}
+	// Note: displayService.GenerateDailyBatch() already uses writeQueue internally;
+	// wrapping it here would cause a re-entrant mutex deadlock (sync.Mutex is not re-entrant).
+	if _, err := s.displayService.GenerateDailyBatch(time.Now(), false); err != nil {
+		logger.Warnf("Failed to ensure daily display batch: %v", err)
 	}
 }
 
