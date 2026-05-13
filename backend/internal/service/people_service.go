@@ -981,21 +981,26 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 			continue
 		}
 
-		// No detection job — check for pending faces and cluster
-		pendingFaceStats, statsErr := s.faceRepo.GetPendingStats()
-		if statsErr != nil {
-			s.appendBackgroundLog(fmt.Sprintf("查询待聚类人脸失败：%v", statsErr))
+		// No detection job — check for processable pending faces and cluster.
+		// Use ListPending (same query as inner loop) to avoid mismatch with
+		// GetPendingStats which doesn't apply backoff filtering.
+		processable, listErr := s.faceRepo.ListPending(1)
+		if listErr != nil {
+			s.appendBackgroundLog(fmt.Sprintf("查询待聚类人脸失败：%v", listErr))
 			time.Sleep(300 * time.Millisecond)
 			continue
 		}
-		if pendingFaceStats.Total == 0 {
+		if len(processable) == 0 {
 			s.setTaskState(model.TaskStatusIdle, "idle", "队列已清空，等待新任务入队", nil)
 			s.idleCount++
 			time.Sleep(s.idleInterval())
 			continue
 		}
 
-		// Cluster pending faces — loop directly without re-checking ClaimNextJob/GetPendingStats
+		// Get full stats for display only (not used for control flow)
+		pendingFaceStats, _ := s.faceRepo.GetPendingStats()
+
+		// Cluster pending faces — loop directly without re-checking ClaimNextJob/ListPending
 		// until no more work, then return to normal cycle.
 		s.idleCount = 0
 		s.setTaskState(model.TaskStatusRunning, "clustering",

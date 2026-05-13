@@ -430,6 +430,9 @@ fi
 
 ## 更新日志
 
+### v1.6.9 (2026-05-13)
+- ✅ 修复 GetPendingStats 不应用退避过滤导致聚类循环 CPU 空转
+
 ### v1.6.8 (2026-05-12)
 - ✅ 修复聚类内层循环空转（markComponentPending 误报 hasMore）导致 CPU 100%
 

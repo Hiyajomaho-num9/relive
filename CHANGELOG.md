@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.9] - 2026-05-13
+
+### Fixed
+- **`GetPendingStats` 不应用退避过滤导致 CPU 空转** — `runBackground` 外层循环用 `GetPendingStats().Total > 0` 判断是否有待聚类人脸，但该查询不应用退避过滤（retry_count 退避期），而内层 `ListPending` 有退避过滤。当 pending faces 全在退避期时，外层永远认为有工作，内层永远返回空，形成无日志的无限循环。修复：外层改用 `ListPending(1)` 判断（与内层同一查询），`GetPendingStats` 仅用于状态显示
+
+---
+
 ## [1.6.8] - 2026-05-12
 
 ### Fixed
