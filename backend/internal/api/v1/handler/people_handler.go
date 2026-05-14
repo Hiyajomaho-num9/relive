@@ -672,31 +672,21 @@ func (h *PeopleHandler) EnqueuePhotoForDetection(c *gin.Context) {
 }
 
 func (h *PeopleHandler) ResetAllPeople(c *gin.Context) {
-	count, err := h.service.ResetAllPeople()
-	if err != nil {
-		writePeopleError(c, http.StatusInternalServerError, "RESET_FAILED", err.Error())
-		return
-	}
-
-	if _, err := h.service.StartBackground(); err != nil {
-		c.JSON(http.StatusOK, model.Response{
-			Success: true,
-			Message: "人物数据已重置，但后台任务启动失败，请手动启动",
-			Data: gin.H{
-				"photos_enqueued":    count,
-				"background_started": false,
-			},
-		})
-		return
-	}
+	go func() {
+		count, err := h.service.ResetAllPeople()
+		if err != nil {
+			logger.Errorf("reset all people failed: %v", err)
+			return
+		}
+		if _, err := h.service.StartBackground(); err != nil {
+			logger.Warnf("reset: background task start failed: %v", err)
+		}
+		logger.Infof("reset all people complete: %d photos enqueued", count)
+	}()
 
 	c.JSON(http.StatusOK, model.Response{
 		Success: true,
-		Message: "人物数据已重置，后台任务已启动",
-		Data: gin.H{
-			"photos_enqueued":    count,
-			"background_started": true,
-		},
+		Message: "全量重建已在后台启动",
 	})
 }
 
