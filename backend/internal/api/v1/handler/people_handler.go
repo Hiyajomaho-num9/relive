@@ -17,6 +17,7 @@ import (
 	"github.com/davidhoo/relive/internal/service"
 	"github.com/davidhoo/relive/internal/util"
 	"github.com/davidhoo/relive/pkg/config"
+	"github.com/davidhoo/relive/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -700,31 +701,22 @@ func (h *PeopleHandler) ResetAllPeople(c *gin.Context) {
 }
 
 func (h *PeopleHandler) RedetectFaces(c *gin.Context) {
-	count, err := h.service.RedetectFaces()
-	if err != nil {
-		writePeopleError(c, http.StatusInternalServerError, "REDETECT_FAILED", err.Error())
-		return
-	}
-
-	if _, err := h.service.StartBackground(); err != nil {
-		c.JSON(http.StatusOK, model.Response{
-			Success: true,
-			Message: "重新检测已启动，但后台任务启动失败，请手动启动",
-			Data: gin.H{
-				"photos_enqueued":    count,
-				"background_started": false,
-			},
-		})
-		return
-	}
+	// Run async: delete + re-enqueue thousands of photos is too slow for a single request.
+	go func() {
+		count, err := h.service.RedetectFaces()
+		if err != nil {
+			logger.Errorf("redetect faces failed: %v", err)
+			return
+		}
+		if _, err := h.service.StartBackground(); err != nil {
+			logger.Warnf("redetect: background task start failed: %v", err)
+		}
+		logger.Infof("redetect faces complete: %d photos enqueued", count)
+	}()
 
 	c.JSON(http.StatusOK, model.Response{
 		Success: true,
-		Message: "重新检测已启动，已命名人物将自动匹配",
-		Data: gin.H{
-			"photos_enqueued":    count,
-			"background_started": true,
-		},
+		Message: "重新检测已在后台启动，已命名人物将自动匹配",
 	})
 }
 
