@@ -489,7 +489,7 @@ func (s *photoService) loadEnabledPathsFromDB() ([]string, error) {
 	}
 
 	if configValue == "" {
-		return []string{}, nil
+		return nil, nil
 	}
 
 	var scanPathsConfig struct {
