@@ -201,7 +201,7 @@
             <div class="task-body">
               <div v-if="queuePending > 0" class="queue-progress">
                 <div class="queue-progress-header">
-                  <span>队列进度</span>
+                  <span>人脸检测</span>
                   <span class="queue-progress-numbers">{{ stats.completed }} / {{ stats.completed + queuePending }}</span>
                 </div>
                 <el-progress :percentage="queueProgressPercent" :stroke-width="10" :show-text="false" />
@@ -209,22 +209,23 @@
                   待处理 {{ queuePending }}<template v-if="stats.failed > 0"> · <span class="danger">失败 {{ stats.failed }}</span></template>
                 </div>
               </div>
-              <div v-else-if="clusteringPending > 0" class="queue-progress">
+
+              <div v-if="clusteringPending > 0" class="queue-progress">
                 <div class="queue-progress-header">
-                  <span>聚类进度</span>
+                  <span>人脸聚类</span>
                 </div>
                 <el-progress :percentage="0" :stroke-width="10" :show-text="false" :indeterminate="true" />
                 <div class="queue-progress-detail">
                   待聚类 {{ clusteringPending }}
                 </div>
               </div>
-              <div v-else class="queue-empty">
+
+              <div v-if="queuePending === 0 && clusteringPending === 0" class="queue-empty">
                 队列已清空，等待新任务入队
               </div>
 
               <div class="task-summary">
-                <span>待聚类 {{ clusteringPending }}</span>
-                <span> · 累计完成 <strong>{{ stats.completed }}</strong></span>
+                <span>累计完成 <strong>{{ stats.completed }}</strong></span>
                 <span v-if="stats.failed > 0"> · 失败 <strong class="danger">{{ stats.failed }}</strong></span>
               </div>
             </div>
