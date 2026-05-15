@@ -119,6 +119,18 @@ func NewPersonMergeSuggestionService(
 		backgroundLogs: make([]string, 0, 32),
 	}
 	_ = svc.loadState()
+
+	// Always mark dirty on startup: the in-memory ANN index is lost on restart
+	// and must be rebuilt, and data may have changed while the service was down.
+	if !svc.state.Paused {
+		svc.mu.Lock()
+		svc.state.Dirty = true
+		svc.state.CursorTargetID = 0
+		svc.annDirty = true
+		_ = svc.saveStateLocked()
+		svc.mu.Unlock()
+	}
+
 	return svc
 }
 
