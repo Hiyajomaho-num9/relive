@@ -290,6 +290,10 @@ func (s *personMergeSuggestionService) MarkDirty(reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.state.Dirty && s.state.CursorTargetID == 0 {
+		return nil
+	}
+
 	s.state.Dirty = true
 	s.state.CursorTargetID = 0
 	s.annMu.Lock()
