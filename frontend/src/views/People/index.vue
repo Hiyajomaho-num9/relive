@@ -703,7 +703,11 @@ const openMergeSuggestionReview = async (id: number) => {
   mergeSuggestionDialogVisible.value = true
   currentMergeSuggestion.value = null
   currentMergeSuggestionId.value = id
-  await loadMergeSuggestionDetail(id)
+  await loadMergeSuggestionDetail(id, true)
+  if (!currentMergeSuggestion.value) {
+    mergeSuggestionDialogVisible.value = false
+    await loadMergeSuggestions()
+  }
 }
 
 const reloadMergeSuggestionReviewState = async (shouldCloseOnComplete = false) => {
