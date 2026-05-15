@@ -209,6 +209,15 @@
                   待处理 {{ queuePending }}<template v-if="stats.failed > 0"> · <span class="danger">失败 {{ stats.failed }}</span></template>
                 </div>
               </div>
+              <div v-else-if="clusteringPending > 0" class="queue-progress">
+                <div class="queue-progress-header">
+                  <span>聚类进度</span>
+                </div>
+                <el-progress :percentage="0" :stroke-width="10" :show-text="false" :indeterminate="true" />
+                <div class="queue-progress-detail">
+                  待聚类 {{ clusteringPending }}
+                </div>
+              </div>
               <div v-else class="queue-empty">
                 队列已清空，等待新任务入队
               </div>
