@@ -53,6 +53,7 @@ ARG BUILD_TIME
 
 # 构建后端
 RUN CGO_ENABLED=1 GOOS=linux go build \
+    -tags "fts5" \
     -ldflags "-X github.com/davidhoo/relive/pkg/version.BuildTime=${BUILD_TIME} -X github.com/davidhoo/relive/pkg/version.GitCommit=${VERSION}" \
     -o relive \
     ./cmd/relive
@@ -60,6 +61,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
 # 构建 relive-analyzer
 WORKDIR /app/cmd/relive-analyzer
 RUN CGO_ENABLED=1 GOOS=linux go build \
+    -tags "fts5" \
     -ldflags "-X github.com/davidhoo/relive/pkg/version.BuildTime=${BUILD_TIME} -X github.com/davidhoo/relive/pkg/version.GitCommit=${VERSION}" \
     -o /app/relive-analyzer \
     .
