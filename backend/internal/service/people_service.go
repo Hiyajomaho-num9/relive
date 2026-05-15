@@ -1395,7 +1395,7 @@ func (s *peopleService) resetBackgroundLogs() {
 }
 
 func (s *peopleService) appendBackgroundLog(message string) {
-	entry := fmt.Sprintf("%s %s", time.Now().Format("15:04:05"), message)
+	entry := fmt.Sprintf("%s %s", time.Now().Format("2006-01-02 15:04:05"), message)
 	s.backgroundLogMu.Lock()
 	defer s.backgroundLogMu.Unlock()
 	s.backgroundLogs = append(s.backgroundLogs, entry)

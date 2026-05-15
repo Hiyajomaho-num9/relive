@@ -820,7 +820,7 @@ func (s *personMergeSuggestionService) appendBackgroundLogLocked(message string)
 	if message == "" {
 		return
 	}
-	entry := fmt.Sprintf("%s %s", time.Now().Format(time.RFC3339), message)
+	entry := fmt.Sprintf("%s %s", time.Now().Format("2006-01-02 15:04:05"), message)
 	s.backgroundLogs = append(s.backgroundLogs, entry)
 	if len(s.backgroundLogs) > 50 {
 		s.backgroundLogs = s.backgroundLogs[len(s.backgroundLogs)-50:]
