@@ -169,7 +169,7 @@ func TestPersonMergeSuggestionService_BuildsPendingSuggestionsForFamilyAndFriend
 	family := createSuggestionTestPerson(t, repos, model.PersonCategoryFamily, []float32{1, 0}, []float32{0.99, 0.01})
 	friend := createSuggestionTestPerson(t, repos, model.PersonCategoryFriend, []float32{0, 1}, []float32{0.01, 0.99})
 	familyLike := createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{1, 0.02})
-	friendLike := createSuggestionTestPerson(t, repos, model.PersonCategoryAcquaintance, []float32{0.02, 1})
+	friendLike := createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{0.02, 1})
 	_ = createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{-1, 0})
 
 	require.NoError(t, svc.MarkDirty("test"))
@@ -179,6 +179,21 @@ func TestPersonMergeSuggestionService_BuildsPendingSuggestionsForFamilyAndFriend
 	require.Len(t, got, 2)
 	assert.Equal(t, []uint{familyLike.ID}, got[family.ID])
 	assert.Equal(t, []uint{friendLike.ID}, got[friend.ID])
+}
+
+func TestPersonMergeSuggestionService_IncludesAcquaintanceAsTarget(t *testing.T) {
+	svc, _, repos, _ := newPersonMergeSuggestionServiceForTest(t)
+
+	acquaintance := createSuggestionTestPerson(t, repos, model.PersonCategoryAcquaintance, []float32{1, 0}, []float32{0.99, 0.01})
+	candidate := createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{1, 0.02})
+	_ = createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{-1, 0})
+
+	require.NoError(t, svc.MarkDirty("test"))
+	require.NoError(t, svc.RunBackgroundSlice())
+
+	got := pendingSuggestionCandidatesByTarget(t, repos.MergeSuggestion)
+	require.Len(t, got, 1)
+	assert.Equal(t, []uint{candidate.ID}, got[acquaintance.ID])
 }
 
 func TestPersonMergeSuggestionService_SkipsCannotLinkCandidates(t *testing.T) {
@@ -386,7 +401,7 @@ func TestPersonMergeSuggestionService_EndToEndReviewFlow(t *testing.T) {
 
 	target := createSuggestionTestPerson(t, repos, model.PersonCategoryFamily, []float32{1, 0}, []float32{0.99, 0.01})
 	excludedCandidate := createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{1, 0.015})
-	mergedCandidate := createSuggestionTestPerson(t, repos, model.PersonCategoryAcquaintance, []float32{1, 0.03})
+	mergedCandidate := createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{1, 0.03})
 	otherTarget := createSuggestionTestPerson(t, repos, model.PersonCategoryFriend, []float32{0, 1}, []float32{0.01, 0.99})
 	_ = createSuggestionTestPerson(t, repos, model.PersonCategoryStranger, []float32{0, 1.02})
 
