@@ -389,6 +389,7 @@ const stats = ref<PeopleStats>({
   pending_faces_total: 0,
   pending_faces_never_clustered: 0,
   pending_faces_retried: 0,
+  total_faces: 0,
 })
 const backgroundLogs = ref<string[]>([])
 const people = ref<Person[]>([])
