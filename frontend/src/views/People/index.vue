@@ -201,12 +201,12 @@
             <div class="task-body">
               <div v-if="queuePending > 0" class="queue-progress">
                 <div class="queue-progress-header">
-                  <span>人脸检测</span>
+                  <span>照片检测</span>
                   <span class="queue-progress-numbers">{{ stats.completed }} / {{ stats.completed + queuePending }}</span>
                 </div>
                 <el-progress :percentage="queueProgressPercent" :stroke-width="10" :show-text="false" />
                 <div class="queue-progress-detail">
-                  待处理 {{ queuePending }}<template v-if="stats.failed > 0"> · <span class="danger">失败 {{ stats.failed }}</span></template>
+                  剩余 {{ queuePending }} 张照片<template v-if="stats.failed > 0"> · <span class="danger">失败 {{ stats.failed }}</span></template>
                 </div>
               </div>
 
@@ -217,7 +217,7 @@
                 </div>
                 <el-progress :percentage="clusteringProgressPercent" :stroke-width="10" :show-text="false" />
                 <div class="queue-progress-detail">
-                  待聚类 {{ clusteringPending }} / 共 {{ stats.total_faces }}
+                  已归类 {{ stats.total_faces - clusteringPending }} / {{ stats.total_faces }} 张人脸
                 </div>
               </div>
 
@@ -226,7 +226,7 @@
               </div>
 
               <div class="task-summary">
-                <span>累计完成 <strong>{{ stats.completed }}</strong></span>
+                <span>已检测 <strong>{{ stats.completed }}</strong> 张照片</span>
                 <span v-if="stats.failed > 0"> · 失败 <strong class="danger">{{ stats.failed }}</strong></span>
               </div>
             </div>
