@@ -302,15 +302,18 @@ func (s *personMergeSuggestionService) MarkDirty(reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.state.Dirty && s.state.CursorTargetID == 0 {
-		return nil
-	}
+	alreadyDirty := s.state.Dirty && s.state.CursorTargetID == 0
 
 	s.state.Dirty = true
 	s.state.CursorTargetID = 0
 	s.annMu.Lock()
 	s.annDirty = true
 	s.annMu.Unlock()
+
+	if alreadyDirty {
+		return nil // already pending — skip log spam and redundant state save
+	}
+
 	if reason != "" {
 		s.appendBackgroundLogLocked("合并建议待更新: " + reason)
 	}
