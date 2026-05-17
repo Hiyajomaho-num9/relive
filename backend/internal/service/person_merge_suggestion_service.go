@@ -545,7 +545,7 @@ func (s *personMergeSuggestionService) mergeSuggestionThreshold() float64 {
 	if s.config != nil && s.config.People.MergeSuggestionThreshold > 0 {
 		return s.config.People.MergeSuggestionThreshold
 	}
-	return 0.62
+	return 0.55
 }
 
 // MergeSuggestionThreshold 返回合并建议阈值（公开方法）
