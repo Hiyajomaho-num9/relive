@@ -67,30 +67,14 @@ func (s *personMergeSuggestionService) buildANNIndex() (*annIndex, error) {
 		}, nil
 	}
 
-	protoFaces, err := bgFaceRepo.ListPrototypeEmbeddings(personIDs, peoplePrototypeCount)
+	protoFaces, err := bgFaceRepo.ListPrototypeEmbeddings(personIDs, peoplePrototypeCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("buildANNIndex: list prototype faces: %w", err)
 	}
 
 	personProtos := make(map[uint][]faceWithEmbedding, len(personIDs))
-	for _, f := range protoFaces {
-		if f == nil || f.PersonID == nil {
-			continue
-		}
-		emb := decodeEmbedding(f.Embedding)
-		personProtos[*f.PersonID] = append(personProtos[*f.PersonID], faceWithEmbedding{
-			face:      f,
-			embedding: emb,
-		})
-	}
-	// Pre-compute norms
-	for pid, protos := range personProtos {
-		for i := range protos {
-			if protos[i].embedding != nil {
-				protos[i].norm = calculateNorm(protos[i].embedding)
-			}
-		}
-		personProtos[pid] = protos
+	for pid, faces := range selectPersonPrototypesStatic(protoFaces, peoplePrototypeCount) {
+		personProtos[pid] = decodeFacesWithEmbeddings(faces)
 	}
 
 	g := newHNSWGraph()
