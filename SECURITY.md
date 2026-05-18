@@ -430,6 +430,15 @@ fi
 
 ## 更新日志
 
+### v1.7.0 (2026-05-18)
+- ✅ 合并建议原型选择和评分与 UI 对齐（多样化原型 + 双向打分）
+- ✅ HNSW ANN M=8→16 改善 60K+ 人物召回率
+- ✅ 修复合并建议启动时未触发巡检（MarkDirty 去重逻辑 + annDirty 遗漏）
+- ✅ 修复合并建议 RunBackgroundSlice 缺少 write gate 导致 database locked
+- ✅ 僵尸检测任务恢复机制
+- ✅ Docker 构建启用 FTS5 全文搜索
+- ✅ 人物重置/重检测改为异步，获取 write gate 防死锁
+
 ### v1.6.9 (2026-05-13)
 - ✅ 修复 GetPendingStats 不应用退避过滤导致聚类循环 CPU 空转
 

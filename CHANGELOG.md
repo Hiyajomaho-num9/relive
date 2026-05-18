@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-05-18
+
+### Added
+- **合并建议目标扩展** — 熟人（acquaintance）类别人物也作为合并建议目标，不再局限于家人/朋友
+- **聚类进度条改进** — 检测和聚类进度条独立显示，聚类进度改为百分比而非无限旋转
+
+### Changed
+- **HNSW ANN 参数优化** — M 从 8 提升至 16，efConstruction 从 20 提升至 32，显著改善 60K+ 人物规模下的近邻搜索召回率（重建耗时约 6.5min，CPU 峰值不变）
+- **合并建议原型选择与 UI 对齐** — ANN 构建改用多样化原型选择（top-10 → farthest-first 选 5），与 UI 相似度计算一致；评分改为双向平均，消除单向偏差
+
+### Fixed
+- **合并建议启动时未触发巡检** — 启动时 MarkDirty 因 `alreadyDirty` 去重逻辑被跳过，导致脏数据未重置、游标未归零，首次巡检实际未执行
+- **MarkDirty 未标记 annDirty** — MarkDirty 只设置 state.Dirty 但遗漏 annDirty=true，导致重启后 ANN 索引未重建，巡检使用过期索引
+- **合并建议阈值回退值不一致** — 配置未设置时回退值与默认值 0.55 不一致
+- **ANN 重建窗口阻塞合并建议** — 移除 ANN 冷却窗口，确保过期索引不阻塞巡检流程
+- **RunBackgroundSlice 缺少 write gate** — 后台巡检写数据库时与前台操作冲突导致 database locked
+- **僵尸检测任务未恢复** — 检测任务卡在 processing 状态时无恢复机制，导致对应照片永远无法被重新处理
+- **合并建议 404 静默处理** — 打开已被删除的建议详情页不再报错
+- **合并建议无脏数据时跳过巡检** — dirty=false 时直接跳过，避免无意义计算
+- **人物统计 total_faces 初始值缺失** — 修复首次查询统计时 total_faces 为 0
+- **Docker 构建启用 FTS5** — Dockerfile 和 Makefile 添加 FTS5 build tag，全文搜索在 Docker 环境正常工作
+- **人物重置/重检测死锁** — 重置和重检测操作获取 write gate 防止与后台循环死锁
+- **人物重置/重检测超时** — 改为异步执行，避免 API 请求超时
+- **缩略图用于人脸检测** — 使用展示用缩略图而非原图进行人脸检测和缩略图生成
+
+### Removed
+- **人脸重检测功能** — 移除 redetect faces 功能（逻辑不稳定，后续重新设计）
+
+---
+
 ## [1.6.9] - 2026-05-13
 
 ### Fixed
