@@ -2590,20 +2590,26 @@ func (s *peopleService) triggerRecluster() model.ReclusterResult {
 		}
 	}
 
-	// Also cluster any remaining pending faces (e.g., from DissolvePerson)
-	affectedPersonIDs, affectedPhotoIDs, err := s.runIncrementalClustering()
-	if err != nil {
-		logger.Warnf("recluster: pending face clustering failed: %v", err)
-	} else {
-		for _, pid := range affectedPersonIDs {
-			_ = s.syncPersonState(pid)
-		}
-		if len(affectedPhotoIDs) > 0 {
-			_ = s.photoRepo.RecomputeTopPersonCategory(affectedPhotoIDs)
+	// Cluster any remaining pending faces (e.g., from DissolvePerson).
+	// Skip when recluster did nothing — avoids expensive runIncrementalClustering call
+	// on every zero-result recluster (takes seconds on large databases).
+	var extraPersonIDs, extraPhotoIDs []uint
+	if result.Evaluated > 0 || result.Reassigned > 0 {
+		var clusteringErr error
+		extraPersonIDs, extraPhotoIDs, clusteringErr = s.runIncrementalClustering()
+		if clusteringErr != nil {
+			logger.Warnf("recluster: pending face clustering failed: %v", clusteringErr)
+		} else {
+			for _, pid := range extraPersonIDs {
+				_ = s.syncPersonState(pid)
+			}
+			if len(extraPhotoIDs) > 0 {
+				_ = s.photoRepo.RecomputeTopPersonCategory(extraPhotoIDs)
+			}
 		}
 	}
 
-	if result.Reassigned > 0 || len(affectedPersonIDs) > 0 || len(affectedPhotoIDs) > 0 {
+	if result.Reassigned > 0 || len(extraPersonIDs) > 0 || len(extraPhotoIDs) > 0 {
 		s.markMergeSuggestionsDirty("trigger_recluster")
 	}
 

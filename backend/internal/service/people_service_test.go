@@ -2943,7 +2943,9 @@ func TestPeopleService_TriggerReclusterMarksMergeSuggestionsDirty(t *testing.T) 
 
 	result := svc.triggerRecluster()
 	assert.Zero(t, result.Evaluated)
-	require.Equal(t, []string{"trigger_recluster"}, reasons)
+	// When recluster evaluates nothing, it skips the extra runIncrementalClustering
+	// call, so markMergeSuggestionsDirty is not called.
+	require.Equal(t, []string(nil), reasons)
 }
 
 func TestAttachComponentWithANNCandidateFn_OnlyScoresCandidates(t *testing.T) {
