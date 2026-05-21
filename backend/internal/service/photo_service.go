@@ -510,6 +510,10 @@ func (s *photoService) loadEnabledPathsFromDB() ([]string, error) {
 		}
 	}
 
+	if len(enabledPaths) == 0 {
+		return nil, nil
+	}
+
 	return enabledPaths, nil
 }
 

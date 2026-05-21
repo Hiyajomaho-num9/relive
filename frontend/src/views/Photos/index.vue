@@ -281,7 +281,7 @@
       </template>
 
       <!-- 空状态：系统中没有照片 -->
-      <el-empty v-if="!photos.length && !loading && systemTotal === 0" description="暂无照片" :image-size="120">
+      <el-empty v-if="!photos.length && !loading && initialized && systemTotal === 0" description="暂无照片" :image-size="120">
         <el-button type="primary" @click="handleAddPath">
           <el-icon><Plus /></el-icon>
           添加扫描路径
@@ -289,7 +289,7 @@
       </el-empty>
 
       <!-- 空状态：搜索结果为空 -->
-      <el-empty v-else-if="!photos.length && !loading && systemTotal > 0" description="未找到匹配的照片" :image-size="120">
+      <el-empty v-else-if="!photos.length && !loading && initialized && systemTotal > 0" description="未找到匹配的照片" :image-size="120">
         <p class="empty-hint">系统中共有 {{ systemTotal }} 张照片，但没有符合当前搜索条件的结果</p>
         <el-button type="primary" @click="resetSearch">
           <el-icon><Refresh /></el-icon>
@@ -641,6 +641,7 @@ const photoStore = usePhotoStore()
 
 const photos = ref<Photo[]>([])
 const loading = ref(false)
+const initialized = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -1742,9 +1743,10 @@ onMounted(async () => {
     loadPhotoCounts(),
     loadCategoriesAndTags(),
     checkOngoingScanTask(),
+    loadPhotos(),
   ])
 
-  loadPhotos()
+  initialized.value = true
 })
 
 // 将当前状态同步到 URL（不触发路由跳转）
