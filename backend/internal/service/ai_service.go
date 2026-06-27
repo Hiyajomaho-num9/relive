@@ -124,6 +124,12 @@ type AIConfigFromDB struct {
 	OpenAIMaxTokens   int     `json:"openai_max_tokens"`
 	OpenAITimeout     int     `json:"openai_timeout"`
 
+	// OpenAI Responses
+	OpenAIResponsesAPIKey   string `json:"openai_responses_api_key"`
+	OpenAIResponsesEndpoint string `json:"openai_responses_endpoint"`
+	OpenAIResponsesModel    string `json:"openai_responses_model"`
+	OpenAIResponsesTimeout  int    `json:"openai_responses_timeout"`
+
 	// VLLM
 	VLLMEndpoint    string  `json:"vllm_endpoint"`
 	VLLMModel       string  `json:"vllm_model"`
@@ -206,6 +212,15 @@ func (s *aiService) initProvider() error {
 			AnalysisPrompt: promptConfig.AnalysisPrompt,
 			CaptionPrompt:  promptConfig.CaptionPrompt,
 		})
+	case "openai_responses":
+		p, err = provider.NewOpenAIResponsesProvider(&provider.OpenAIResponsesConfig{
+			APIKey:         aiConfig.OpenAIResponsesAPIKey,
+			Endpoint:       aiConfig.OpenAIResponsesEndpoint,
+			Model:          aiConfig.OpenAIResponsesModel,
+			Timeout:        aiConfig.OpenAIResponsesTimeout,
+			AnalysisPrompt: promptConfig.AnalysisPrompt,
+			CaptionPrompt:  promptConfig.CaptionPrompt,
+		})
 	case "vllm":
 		p, err = provider.NewVLLMProvider(&provider.VLLMConfig{
 			Endpoint:       aiConfig.VLLMEndpoint,
@@ -283,6 +298,11 @@ func (s *aiService) loadAIConfig() *AIConfigFromDB {
 		OpenAITemperature: s.config.AI.OpenAI.Temperature,
 		OpenAIMaxTokens:   s.config.AI.OpenAI.MaxTokens,
 		OpenAITimeout:     s.config.AI.OpenAI.Timeout,
+
+		OpenAIResponsesAPIKey:   s.config.AI.OpenAIResponses.APIKey,
+		OpenAIResponsesEndpoint: s.config.AI.OpenAIResponses.Endpoint,
+		OpenAIResponsesModel:    s.config.AI.OpenAIResponses.Model,
+		OpenAIResponsesTimeout:  s.config.AI.OpenAIResponses.Timeout,
 
 		VLLMEndpoint:    s.config.AI.VLLM.Endpoint,
 		VLLMModel:       s.config.AI.VLLM.Model,
@@ -375,6 +395,13 @@ func (s *aiService) getProviderConfigFromDB(providerName string, aiConfig *AICon
 			MaxTokens:   aiConfig.OpenAIMaxTokens,
 			Timeout:     aiConfig.OpenAITimeout,
 		}, nil
+	case "openai_responses":
+		return &provider.OpenAIResponsesConfig{
+			APIKey:   aiConfig.OpenAIResponsesAPIKey,
+			Endpoint: aiConfig.OpenAIResponsesEndpoint,
+			Model:    aiConfig.OpenAIResponsesModel,
+			Timeout:  aiConfig.OpenAIResponsesTimeout,
+		}, nil
 	case "vllm":
 		return &provider.VLLMConfig{
 			Endpoint:    aiConfig.VLLMEndpoint,
@@ -414,6 +441,13 @@ func (s *aiService) getProviderConfig(providerName string) (interface{}, error) 
 			Temperature: s.config.AI.OpenAI.Temperature,
 			MaxTokens:   s.config.AI.OpenAI.MaxTokens,
 			Timeout:     s.config.AI.OpenAI.Timeout,
+		}, nil
+	case "openai_responses":
+		return &provider.OpenAIResponsesConfig{
+			APIKey:   s.config.AI.OpenAIResponses.APIKey,
+			Endpoint: s.config.AI.OpenAIResponses.Endpoint,
+			Model:    s.config.AI.OpenAIResponses.Model,
+			Timeout:  s.config.AI.OpenAIResponses.Timeout,
 		}, nil
 	case "vllm":
 		return &provider.VLLMConfig{

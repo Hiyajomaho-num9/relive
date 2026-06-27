@@ -486,7 +486,8 @@ const formatAIProvider = (provider?: string) => {
   const providerMap: Record<string, string> = {
     'qwen': '通义千问',
     'ollama': 'Ollama',
-    'openai': 'OpenAI',
+    'openai': 'OpenAI (Compatible)',
+    'openai_responses': 'OpenAI (Responses)',
     'vllm': 'vLLM',
     'hybrid': '混合模式'
   }

@@ -20,7 +20,7 @@ type Config struct {
 	People      PeopleConfig      `yaml:"people"`
 	LegacyML    LegacyMLConfig    `yaml:"ml"`
 	Display     DisplayConfig     `yaml:"display"`
-	Geocode     GeocodeConfig     `yaml:"geocode"`     // 地理编码配置
+	Geocode     GeocodeConfig     `yaml:"geocode"` // 地理编码配置
 	Logging     LoggingConfig     `yaml:"logging"`
 	Security    SecurityConfig    `yaml:"security"`
 }
@@ -61,14 +61,15 @@ type PerformanceConfig struct {
 
 // AIConfig AI 配置
 type AIConfig struct {
-	Provider    string               `yaml:"provider"`    // ollama / qwen / openai / vllm / hybrid
-	Timeout     int                  `yaml:"timeout"`     // 超时时间（秒）
-	Temperature float64              `yaml:"temperature"` // 温度参数
-	Ollama      OllamaConfig         `yaml:"ollama"`
-	Qwen        QwenConfig           `yaml:"qwen"`
-	OpenAI      OpenAIConfig         `yaml:"openai"`
-	VLLM        VLLMConfig           `yaml:"vllm"`
-	Hybrid      HybridProviderConfig `yaml:"hybrid"`
+	Provider        string                `yaml:"provider"`    // ollama / qwen / openai / openai_responses / vllm / hybrid
+	Timeout         int                   `yaml:"timeout"`     // 超时时间（秒）
+	Temperature     float64               `yaml:"temperature"` // 温度参数
+	Ollama          OllamaConfig          `yaml:"ollama"`
+	Qwen            QwenConfig            `yaml:"qwen"`
+	OpenAI          OpenAIConfig          `yaml:"openai"`
+	OpenAIResponses OpenAIResponsesConfig `yaml:"openai_responses"`
+	VLLM            VLLMConfig            `yaml:"vllm"`
+	Hybrid          HybridProviderConfig  `yaml:"hybrid"`
 }
 
 // PeopleConfig 人物系统配置
@@ -83,12 +84,12 @@ type PeopleConfig struct {
 	MergeSuggestionMaxPairsPerRun  int     `yaml:"merge_suggestion_max_pairs_per_run"`
 	MergeSuggestionBatchSize       int     `yaml:"merge_suggestion_batch_size"`
 	MergeSuggestionCooldownSeconds int     `yaml:"merge_suggestion_cooldown_seconds"`
-	MergeSuggestionStaleSeconds   int     `yaml:"merge_suggestion_stale_seconds"`
+	MergeSuggestionStaleSeconds    int     `yaml:"merge_suggestion_stale_seconds"`
 	ClusteringIntervalMs           int     `yaml:"clustering_interval_ms"`
-	ANNBuildBatchSize      int     `yaml:"ann_build_batch_size"`       // HNSW nodes per insert batch (default 100)
-	ANNBuildCPUDuty        float64 `yaml:"ann_build_cpu_duty"`         // target CPU duty cycle 0.3-1.0 (default 0.5)
-	ANNRebuildWindowStart  int     `yaml:"ann_rebuild_window_start"`   // deprecated: ANN rebuild now happens whenever dirty
-	ANNRebuildWindowEnd    int     `yaml:"ann_rebuild_window_end"`     // deprecated: ANN rebuild now happens whenever dirty
+	ANNBuildBatchSize              int     `yaml:"ann_build_batch_size"`     // HNSW nodes per insert batch (default 100)
+	ANNBuildCPUDuty                float64 `yaml:"ann_build_cpu_duty"`       // target CPU duty cycle 0.3-1.0 (default 0.5)
+	ANNRebuildWindowStart          int     `yaml:"ann_rebuild_window_start"` // deprecated: ANN rebuild now happens whenever dirty
+	ANNRebuildWindowEnd            int     `yaml:"ann_rebuild_window_end"`   // deprecated: ANN rebuild now happens whenever dirty
 }
 
 const (
@@ -96,10 +97,10 @@ const (
 	defaultMergeSuggestionMaxPairsPerRun  = 200
 	defaultMergeSuggestionBatchSize       = 100
 	defaultMergeSuggestionCooldownSeconds = 300
-	defaultMergeSuggestionStaleSeconds   = 86400
+	defaultMergeSuggestionStaleSeconds    = 86400
 	defaultClusteringIntervalMs           = 300
-	defaultANNBuildBatchSize      = 100
-	defaultANNBuildCPUDuty        = 0.5
+	defaultANNBuildBatchSize              = 100
+	defaultANNBuildCPUDuty                = 0.5
 )
 
 // LegacyMLConfig 兼容旧版人物配置块
@@ -133,6 +134,14 @@ type OpenAIConfig struct {
 	Temperature float64 `yaml:"temperature"`
 	MaxTokens   int     `yaml:"max_tokens"`
 	Timeout     int     `yaml:"timeout"`
+}
+
+// OpenAIResponsesConfig OpenAI Responses API 配置
+type OpenAIResponsesConfig struct {
+	APIKey   string `yaml:"api_key"`
+	Endpoint string `yaml:"endpoint"`
+	Model    string `yaml:"model"`
+	Timeout  int    `yaml:"timeout"`
 }
 
 // VLLMConfig vLLM 配置
@@ -361,7 +370,6 @@ func Load(path string) (*Config, error) {
 		cfg.People.ANNBuildCPUDuty = defaultANNBuildCPUDuty
 	}
 
-
 	// 从环境变量覆盖敏感配置
 	if secret := os.Getenv("JWT_SECRET"); secret != "" {
 		cfg.Security.JWTSecret = secret
@@ -418,12 +426,13 @@ func (c *Config) Validate() error {
 
 	// 验证 AI 提供者
 	validProviders := map[string]bool{
-		"ollama": true,
-		"qwen":   true,
-		"openai": true,
-		"vllm":   true,
-		"hybrid": true,
-		"":       true, // 允许为空（后续通过 Web 界面配置）
+		"ollama":           true,
+		"qwen":             true,
+		"openai":           true,
+		"openai_responses": true,
+		"vllm":             true,
+		"hybrid":           true,
+		"":                 true, // 允许为空（后续通过 Web 界面配置）
 	}
 	if !validProviders[c.AI.Provider] {
 		return fmt.Errorf("invalid AI provider: %s", c.AI.Provider)
