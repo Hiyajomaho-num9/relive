@@ -48,7 +48,7 @@ export interface GeocodeConfig {
 
 // AI Provider configuration
 export interface AIConfig {
-  provider: string          // Current active provider: ollama / qwen / openai / vllm / hybrid
+  provider: string          // Current active provider: ollama / qwen / openai / openai_responses / vllm / hybrid
   temperature: number       // Temperature parameter (0.0-1.0)
   timeout: number           // Timeout in seconds
 
@@ -72,6 +72,12 @@ export interface AIConfig {
   openai_temperature: number
   openai_max_tokens: number
   openai_timeout: number
+
+  // OpenAI Responses configuration
+  openai_responses_api_key: string
+  openai_responses_endpoint: string
+  openai_responses_model: string
+  openai_responses_timeout: number
 
   // VLLM configuration
   vllm_endpoint: string
@@ -483,6 +489,10 @@ export const configApi = {
     openai_temperature: 0.7,
     openai_max_tokens: 1000,
     openai_timeout: 60,
+    openai_responses_api_key: '',
+    openai_responses_endpoint: 'https://api.openai.com/v1/responses',
+    openai_responses_model: 'gpt-5.4',
+    openai_responses_timeout: 60,
     vllm_endpoint: 'http://localhost:8000/v1/chat/completions',
     vllm_model: '',
     vllm_temperature: 0.7,

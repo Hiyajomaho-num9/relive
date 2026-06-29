@@ -265,10 +265,16 @@
                   <el-tag size="small" type="success">推荐</el-tag>
                 </div>
               </el-option>
-              <el-option value="openai" label="OpenAI (GPT-4V)">
+              <el-option value="openai" label="OpenAI (Compatible)">
                 <div class="provider-option">
-                  <span>OpenAI (GPT-4V)</span>
-                  <el-tag size="small">高质量</el-tag>
+                  <span>OpenAI (Compatible)</span>
+                  <el-tag size="small">Chat Completions</el-tag>
+                </div>
+              </el-option>
+              <el-option value="openai_responses" label="OpenAI (Responses)">
+                <div class="provider-option">
+                  <span>OpenAI (Responses)</span>
+                  <el-tag size="small">GPT-5</el-tag>
                 </div>
               </el-option>
               <el-option value="ollama" label="Ollama (本地)">
@@ -372,17 +378,17 @@
             </div>
           </el-form-item>
 
-          <!-- OpenAI Configuration -->
+          <!-- OpenAI Compatible Configuration -->
           <el-divider content-position="left">
             <el-icon><Cpu /></el-icon>
-            OpenAI 配置
+            OpenAI (Compatible) 配置
           </el-divider>
 
           <el-form-item label="API Key">
             <div class="input-with-button">
               <el-input
                 v-model="aiConfig.openai_api_key"
-                placeholder="请输入 OpenAI API Key"
+                placeholder="请输入 OpenAI Compatible API Key"
                 type="password"
                 show-password
               />
@@ -397,7 +403,7 @@
           </el-form-item>
 
           <el-form-item label="API 端点">
-            <el-input v-model="aiConfig.openai_endpoint" placeholder="默认使用 OpenAI 端点，可配置代理" />
+            <el-input v-model="aiConfig.openai_endpoint" placeholder="https://api.openai.com/v1/chat/completions" />
           </el-form-item>
 
           <el-form-item label="模型">
@@ -419,6 +425,48 @@
 
           <el-form-item label="最大 Tokens">
             <el-input-number v-model="aiConfig.openai_max_tokens" :min="100" :max="4000" class="input-number-width-sm" />
+          </el-form-item>
+
+          <!-- OpenAI Responses Configuration -->
+          <el-divider content-position="left">
+            <el-icon><Cpu /></el-icon>
+            OpenAI (Responses) 配置
+          </el-divider>
+
+          <el-form-item label="API Key">
+            <div class="input-with-button">
+              <el-input
+                v-model="aiConfig.openai_responses_api_key"
+                placeholder="请输入 OpenAI Responses API Key"
+                type="password"
+                show-password
+              />
+              <el-button @click="openOpenAIDocs">
+                <el-icon><Link /></el-icon>
+                申请
+              </el-button>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="API 端点">
+            <el-input v-model="aiConfig.openai_responses_endpoint" placeholder="https://api.openai.com/v1/responses" />
+          </el-form-item>
+
+          <el-form-item label="模型">
+            <div class="model-select-row">
+              <el-select v-model="openAIResponsesModelSelection" class="select-width-lg" @change="handleOpenAIResponsesModelSelectionChange">
+                <el-option value="gpt-5.5" label="gpt-5.5" />
+                <el-option value="gpt-5.4" label="gpt-5.4 (默认)" />
+                <el-option value="gpt-5.4-mini" label="gpt-5.4-mini" />
+                <el-option value="__custom__" label="自定义" />
+              </el-select>
+              <el-input
+                v-if="openAIResponsesModelSelection === '__custom__'"
+                v-model="aiConfig.openai_responses_model"
+                placeholder="请输入自定义 Responses 模型名"
+                class="model-input"
+              />
+            </div>
           </el-form-item>
 
           <!-- Ollama Configuration -->
@@ -485,7 +533,8 @@
           <el-form-item label="主提供商">
             <el-select v-model="aiConfig.hybrid_primary" placeholder="选择主提供商" class="full-width">
               <el-option value="qwen" label="通义千问 (Qwen)" />
-              <el-option value="openai" label="OpenAI" />
+              <el-option value="openai" label="OpenAI (Compatible)" />
+              <el-option value="openai_responses" label="OpenAI (Responses)" />
               <el-option value="ollama" label="Ollama" />
               <el-option value="vllm" label="vLLM" />
             </el-select>
@@ -495,7 +544,8 @@
             <el-select v-model="aiConfig.hybrid_fallback" placeholder="选择备用提供商" class="full-width">
               <el-option value="" label="无备用" />
               <el-option value="qwen" label="通义千问 (Qwen)" />
-              <el-option value="openai" label="OpenAI" />
+              <el-option value="openai" label="OpenAI (Compatible)" />
+              <el-option value="openai_responses" label="OpenAI (Responses)" />
               <el-option value="ollama" label="Ollama" />
               <el-option value="vllm" label="vLLM" />
             </el-select>
@@ -520,7 +570,7 @@
                 <strong>推荐配置：</strong>
                 <ul class="info-list compact">
                   <li>日常使用：通义千问 (性价比高，¥0.004/张)</li>
-                  <li>高质量分析：OpenAI GPT-4V (¥0.07/张)</li>
+                  <li>高质量分析：OpenAI (Responses) + gpt-5.4</li>
                   <li>免费方案：Ollama + llava (本地运行)</li>
                 </ul>
               </div>
@@ -655,12 +705,15 @@ const loadingAI = ref(false)
 const savingAI = ref(false)
 const qwenPresetModels = ['qwen-vl-max', 'qwen-vl-plus', 'qwen3.5-flash', 'qwen3.5-plus', 'qwen3-vl-plus', 'qwen3-vl-flash']
 const openAIPresetModels = ['gpt-4-vision-preview', 'gpt-4o', 'gpt-4o-mini']
+const openAIResponsesPresetModels = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']
 const qwenModelSelection = ref('qwen-vl-max')
 const openAIModelSelection = ref('gpt-4-vision-preview')
+const openAIResponsesModelSelection = ref('gpt-5.4')
 
 const syncAIModelSelections = () => {
   qwenModelSelection.value = qwenPresetModels.includes(aiConfig.value.qwen_model) ? aiConfig.value.qwen_model : '__custom__'
   openAIModelSelection.value = openAIPresetModels.includes(aiConfig.value.openai_model) ? aiConfig.value.openai_model : '__custom__'
+  openAIResponsesModelSelection.value = openAIResponsesPresetModels.includes(aiConfig.value.openai_responses_model) ? aiConfig.value.openai_responses_model : '__custom__'
 }
 
 const handleQwenModelSelectionChange = (value: string) => {
@@ -676,6 +729,14 @@ const handleOpenAIModelSelectionChange = (value: string) => {
     aiConfig.value.openai_model = value
   } else if (openAIPresetModels.includes(aiConfig.value.openai_model)) {
     aiConfig.value.openai_model = ''
+  }
+}
+
+const handleOpenAIResponsesModelSelectionChange = (value: string) => {
+  if (value !== '__custom__') {
+    aiConfig.value.openai_responses_model = value
+  } else if (openAIResponsesPresetModels.includes(aiConfig.value.openai_responses_model)) {
+    aiConfig.value.openai_responses_model = ''
   }
 }
 
@@ -776,6 +837,10 @@ const handleSaveAIConfig = async () => {
   }
   if (openAIModelSelection.value === '__custom__' && !aiConfig.value.openai_model.trim()) {
     ElMessage.warning('请输入自定义 OpenAI 模型名')
+    return
+  }
+  if (openAIResponsesModelSelection.value === '__custom__' && !aiConfig.value.openai_responses_model.trim()) {
+    ElMessage.warning('请输入自定义 Responses 模型名')
     return
   }
 

@@ -58,6 +58,12 @@ ai:
     max_tokens: 1000
     timeout: 60
 
+  openai_responses:
+    api_key: ""
+    endpoint: "https://api.openai.com/v1/responses"
+    model: "gpt-5.4"
+    timeout: 60
+
   vllm:
     endpoint: "http://host.docker.internal:8000"
     model: "llava-v1.6-vicuna-13b"

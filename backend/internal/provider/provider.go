@@ -9,22 +9,23 @@ import (
 type ProviderType string
 
 const (
-	ProviderTypeQwen   ProviderType = "qwen"
-	ProviderTypeOllama ProviderType = "ollama"
-	ProviderTypeOpenAI ProviderType = "openai"
-	ProviderTypeVLLM   ProviderType = "vllm"
-	ProviderTypeHybrid ProviderType = "hybrid"
+	ProviderTypeQwen            ProviderType = "qwen"
+	ProviderTypeOllama          ProviderType = "ollama"
+	ProviderTypeOpenAI          ProviderType = "openai"
+	ProviderTypeOpenAIResponses ProviderType = "openai_responses"
+	ProviderTypeVLLM            ProviderType = "vllm"
+	ProviderTypeHybrid          ProviderType = "hybrid"
 )
 
 // CaptionResult 文案生成结果
 type CaptionResult struct {
-	Caption   string        // 生成的文案
-	Provider  string        // 使用的 provider
-	ModelName string        // 使用的模型
-	Timestamp time.Time     // 生成时间
-	Duration  time.Duration // 耗时
-	TokensUsed int          // 消耗的 tokens
-	Cost      float64       // 实际成本
+	Caption    string        // 生成的文案
+	Provider   string        // 使用的 provider
+	ModelName  string        // 使用的模型
+	Timestamp  time.Time     // 生成时间
+	Duration   time.Duration // 耗时
+	TokensUsed int           // 消耗的 tokens
+	Cost       float64       // 实际成本
 }
 
 // CaptionRequest 文案生成请求
@@ -147,6 +148,11 @@ func NewProvider(providerType ProviderType, config interface{}) (AIProvider, err
 			return NewOpenAIProvider(cfg)
 		}
 		return nil, fmt.Errorf("invalid openai config type")
+	case ProviderTypeOpenAIResponses:
+		if cfg, ok := config.(*OpenAIResponsesConfig); ok {
+			return NewOpenAIResponsesProvider(cfg)
+		}
+		return nil, fmt.Errorf("invalid openai responses config type")
 	case ProviderTypeVLLM:
 		if cfg, ok := config.(*VLLMConfig); ok {
 			return NewVLLMProvider(cfg)
