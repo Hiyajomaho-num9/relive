@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.1] - 2026-06-29
+
+### Added
+- **新增 OpenAI Responses provider** — AI 分析服务新增 `openai_responses` 提供商，支持通过 OpenAI Responses API 进行图片理解与文案生成，可在配置页直接填写 `API Key`、`Endpoint`、`Model` 和 `Timeout`
+
+### Changed
+- **人物合并建议巡检策略调整** — 合并建议的过期自动重跑机制保留为兜底安全网，默认间隔从 1 小时调整为 24 小时，减少无变化数据上的重复巡检
+- **人物系统召回与打分优化** — 提升合并建议 ANN 搜索范围，并在 fallback attach scoring 中优先使用高质量人脸重评分，减少同一人物被误拆分
+
+### Fixed
+- **GeoNames 中国省级映射修复** — 修正离线逆地理编码中中国 `admin1` 代码到省级行政区名称的映射，避免部分照片显示错误省份
+- **合并建议并发脏标记丢失** — 修复巡检过程中并发 `MarkDirty` 被覆盖后无法从头重扫的问题，避免使用过期 ANN 索引导致候选遗漏
+- **高相似陌生人人物未进入合并建议** — 修复高相似度 stranger 候选被错误跳过的问题，避免可合并候选静默丢失
+- **零结果 recluster 触发额外全量扫描** — 当 feedback recluster 没有实际评估对象时跳过额外的 `runIncrementalClustering()`，减少 NAS 上的大型无效扫描
+- **照片管理页首次加载误闪空状态** — 前端首次加载改为并行请求并增加初始化保护，同时修复后端空切片导致的总数误判
+
+---
+
 ## [1.7.0] - 2026-05-18
 
 ### Added
