@@ -685,41 +685,21 @@ const handleAnalyze = async () => {
   try {
     analyzing.value = true
 
-    // 根据是否已分析调用不同 API
+    // 后端 /ai/analyze 与 /ai/reanalyze 均为同步分析（含两次 AI 会话，可能耗时较长），
+    // 默认 30s 超时不足以覆盖，这里放宽到 5 分钟，避免长耗时分析被 axios 中断
+    const longTimeout: { timeout: number } = { timeout: 300000 }
+
+    // 根据是否已分析调用不同 API；await 返回即表示分析已完成并写入数据库
     if (isReanalyze) {
-      await aiApi.reAnalyze(photo.value.id)
-      ElMessage.success('重新分析请求已提交')
+      await aiApi.reAnalyze(photo.value.id, longTimeout)
     } else {
-      await aiApi.analyze(photo.value.id)
-      ElMessage.success('分析请求已提交')
+      await aiApi.analyze(photo.value.id, longTimeout)
     }
 
-    // 记录当前分析时间用于检测变化
-    const lastAnalyzedAt = photo.value.analyzed_at
-
-    // 轮询结果
-    const timer = addTimer(setInterval(async () => {
-      await loadPhoto()
-      // 首次分析：检测 ai_analyzed 变为 true
-      // 重新分析：检测 analyzed_at 时间变化
-      const completed = !isReanalyze
-        ? photo.value?.ai_analyzed
-        : (photo.value?.analyzed_at && photo.value.analyzed_at !== lastAnalyzedAt)
-
-      if (completed) {
-        clearInterval(timer)
-        analyzing.value = false
-        ElMessage.success('分析完成')
-      }
-    }, 2000))
-
-    // 60秒超时（重新分析可能需要更长时间）
-    addTimer(setTimeout(() => {
-      clearInterval(timer)
-      analyzing.value = false
-    }, 60000))
+    // 后端同步返回即分析已完成，直接重新加载照片详情以刷新页面
+    await loadPhoto()
+    ElMessage.success(isReanalyze ? '重新分析完成' : '分析完成')
   } catch (error: any) {
-    analyzing.value = false
     // 特殊处理 AI 服务未配置的情况
     if (error.response?.status === 503) {
       ElMessage.warning({
@@ -727,8 +707,10 @@ const handleAnalyze = async () => {
         duration: 5000
       })
     } else {
-      ElMessage.error(error.message || '分析失败')
+      ElMessage.error(error.response?.data?.error?.message || error.message || '分析失败')
     }
+  } finally {
+    analyzing.value = false
   }
 }
 

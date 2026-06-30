@@ -1,11 +1,13 @@
 import http from '@/utils/request'
+import type { AxiosRequestConfig } from 'axios'
 import type { AIAnalyzeProgress, AIAnalyzeBatchResponse, AIAnalyzeTask, AIProviderInfo, AnalysisRuntimeStatus, AIBackgroundLogsResponse } from '@/types/ai'
 import type { ApiResponse } from '@/types/api'
 
 export const aiApi = {
   // 分析单张照片
-  analyze(photoId: number) {
-    return http.post<ApiResponse<void>>('/ai/analyze', { photo_id: photoId })
+  // 后端为同步分析（含两次 AI 会话，可能耗时较长），可通过 config 覆盖默认 30s 超时
+  analyze(photoId: number, config?: AxiosRequestConfig) {
+    return http.post<ApiResponse<void>>('/ai/analyze', { photo_id: photoId }, config)
   },
 
   // 批量分析
@@ -32,8 +34,8 @@ export const aiApi = {
   },
 
   // 重新分析
-  reAnalyze(id: number) {
-    return http.post<ApiResponse<void>>(`/ai/reanalyze/${id}`)
+  reAnalyze(id: number, config?: AxiosRequestConfig) {
+    return http.post<ApiResponse<void>>(`/ai/reanalyze/${id}`, undefined, config)
   },
 
   // 获取 Provider 信息

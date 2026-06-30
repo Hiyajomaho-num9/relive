@@ -202,7 +202,7 @@
               <div v-if="queuePending > 0" class="queue-progress">
                 <div class="queue-progress-header">
                   <span>照片检测</span>
-                  <span class="queue-progress-numbers">{{ stats.completed }} / {{ stats.completed + queuePending }}</span>
+                  <span class="queue-progress-numbers">{{ stats.detected_photos }} / {{ stats.detected_photos + queuePending }}</span>
                 </div>
                 <el-progress :percentage="queueProgressPercent" :stroke-width="10" :show-text="false" />
                 <div class="queue-progress-detail">
@@ -226,7 +226,7 @@
               </div>
 
               <div class="task-summary">
-                <span>已检测 <strong>{{ stats.completed }}</strong> 张照片</span>
+                <span>已检测 <strong>{{ stats.detected_photos }}</strong> 张照片</span>
                 <span v-if="stats.failed > 0"> · 失败 <strong class="danger">{{ stats.failed }}</strong></span>
               </div>
             </div>
@@ -390,6 +390,8 @@ const stats = ref<PeopleStats>({
   pending_faces_never_clustered: 0,
   pending_faces_retried: 0,
   total_faces: 0,
+  detected_photos: 0,
+  pending_photos: 0,
 })
 const backgroundLogs = ref<string[]>([])
 const people = ref<Person[]>([])
@@ -440,7 +442,7 @@ const clusteringProgressPercent = computed(() => {
   return Math.round((clustered / total) * 100)
 })
 const queueProgressPercent = computed(() => {
-  const done = stats.value.completed
+  const done = stats.value.detected_photos
   const totalCount = done + queuePending.value
   if (totalCount === 0) return 0
   return Math.round((done / totalCount) * 100)
