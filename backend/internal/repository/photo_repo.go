@@ -35,7 +35,7 @@ type PhotoRepository interface {
 	ListAll() ([]*model.Photo, error)
 	IterateActivePhotos(columns []string, batchSize int, fn func(photos []*model.Photo) error) error
 	ListByIDs(ids []uint) ([]*model.Photo, error)
-	ListPhotosByPersonID(personID uint) ([]*model.Photo, error) // 通过 JOIN 直接获取人物关联照片
+	ListPhotosByPersonID(personID uint) ([]*model.Photo, error)         // 通过 JOIN 直接获取人物关联照片
 	ListPhotoSummariesByPersonID(personID uint) ([]*model.Photo, error) // 精简列 + SQL 排序
 	ListPhotoSummariesByPersonIDPaginated(personID uint, page, pageSize int) ([]*model.Photo, int64, error)
 
@@ -959,19 +959,54 @@ func (r *photoRepository) RecomputeTopPersonCategory(photoIDs []uint) error {
 		byPhotoID[row.PhotoID] = row
 	}
 
+	// 批量更新：每条 SQL 用 CASE WHEN 一次性写入一个批次，更新次数随批次数
+	// （而非照片数）增长。每个批次参数量 = 5*N+1（face_count/top_person_category
+	// 各 2*N、WHERE IN 的 N、updated_at 的 1），按 sqliteVarLimit 限制批次大小。
+	const updateBatchSize = 50
+
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		for _, photoID := range dedupedIDs {
-			current, ok := byPhotoID[photoID]
-			updates := map[string]interface{}{
-				"face_count":          0,
-				"top_person_category": "",
+		for i := 0; i < len(dedupedIDs); i += updateBatchSize {
+			end := i + updateBatchSize
+			if end > len(dedupedIDs) {
+				end = len(dedupedIDs)
 			}
-			if ok {
-				updates["face_count"] = current.FaceCount
-				updates["top_person_category"] = personCategoryFromRank(current.CategoryRank)
+			batch := dedupedIDs[i:end]
+
+			// 占位符顺序与 SQL 一致：face_count 的 CASE → top_person_category 的 CASE
+			// → updated_at → WHERE IN，args 必须按同样顺序追加，避免错位。
+			faceCountParts := make([]string, 0, len(batch))
+			categoryParts := make([]string, 0, len(batch))
+			whereParts := make([]string, 0, len(batch))
+			args := make([]interface{}, 0, 5*len(batch)+1)
+
+			for _, photoID := range batch {
+				faceCount := 0
+				if current, ok := byPhotoID[photoID]; ok {
+					faceCount = current.FaceCount
+				}
+				faceCountParts = append(faceCountParts, "WHEN ? THEN ?")
+				args = append(args, photoID, faceCount)
+			}
+			for _, photoID := range batch {
+				category := ""
+				if current, ok := byPhotoID[photoID]; ok {
+					category = personCategoryFromRank(current.CategoryRank)
+				}
+				categoryParts = append(categoryParts, "WHEN ? THEN ?")
+				args = append(args, photoID, category)
+			}
+			args = append(args, time.Now()) // updated_at = ?
+			for _, photoID := range batch {
+				whereParts = append(whereParts, "?")
+				args = append(args, photoID) // WHERE id IN (...)
 			}
 
-			if err := tx.Model(&model.Photo{}).Where("id = ?", photoID).Updates(updates).Error; err != nil {
+			sql := "UPDATE photos SET face_count = CASE id " +
+				strings.Join(faceCountParts, " ") + " END, " +
+				"top_person_category = CASE id " + strings.Join(categoryParts, " ") + " END, " +
+				"updated_at = ? WHERE id IN (" + strings.Join(whereParts, ",") + ")"
+
+			if err := tx.Exec(sql, args...).Error; err != nil {
 				return err
 			}
 		}

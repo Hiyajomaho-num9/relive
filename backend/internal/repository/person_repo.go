@@ -16,8 +16,8 @@ type PersonRepository interface {
 	ListAll() ([]*model.Person, error)
 	ListByIDs(ids []uint) ([]*model.Person, error)
 	ListMergeSuggestionTargets(cursorID uint, limit int) ([]*model.Person, error) // cursor 分页，只返回 family/friend 且有脸的人物
-	ListWithAvatar() ([]*model.Person, error) // 只返回有头像的人物（用于合并/移动候选列表）
-	ListPeople(opts ListPeopleOptions) ([]*model.Person, int64, error) // 数据库层分页查询
+	ListWithAvatar() ([]*model.Person, error)                                     // 只返回有头像的人物（用于合并/移动候选列表）
+	ListPeople(opts ListPeopleOptions) ([]*model.Person, int64, error)            // 数据库层分页查询
 	RefreshStats(personID uint) error
 	MergeInto(targetPersonID uint, sourcePersonIDs []uint) ([]uint, error)
 }
@@ -163,10 +163,12 @@ func (r *personRepository) MergeInto(targetPersonID uint, sourcePersonIDs []uint
 			return gorm.ErrRecordNotFound
 		}
 
-		allPersonIDs := append([]uint{targetPersonID}, sourceIDs...)
+		// 仅收集来源人物涉及的照片 ID：合并只会改变来源人物人脸的归属，
+		// 仅含目标人物且人脸归属未变的照片无需重算。Distinct 自带去重，
+		// 多个来源人物或目标与来源出现在同一照片时不会重复。
 		if err := tx.Model(&model.Face{}).
 			Distinct("photo_id").
-			Where("person_id IN ?", allPersonIDs).
+			Where("person_id IN ?", sourceIDs).
 			Order("photo_id ASC").
 			Pluck("photo_id", &affectedPhotoIDs).Error; err != nil {
 			return err
