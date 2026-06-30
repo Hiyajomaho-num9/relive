@@ -29,12 +29,6 @@ type PeopleJobRepository interface {
 	GetStats() (*PeopleJobStats, error)
 	DeleteTerminalBefore(cutoff time.Time) (int64, error)
 
-	// ListTerminalIDsBefore 返回早于 cutoff 的终态任务 ID（completed/failed/cancelled），
-	// 按 updated_at 升序、最多 limit 条，供分批物理删除使用。利用 (status, updated_at) 索引。
-	ListTerminalIDsBefore(cutoff time.Time, limit int) ([]uint, error)
-	// DeleteByIDs 按 ID 物理删除一批任务，返回实际删除行数。
-	DeleteByIDs(ids []uint) (int64, error)
-
 	// Remote worker lease methods
 	ClaimNextRemote(workerID string, limit int, lockUntil time.Time) ([]*model.PeopleJob, error)
 	HeartbeatRemote(id uint, workerID string, progress int, statusMsg string, lockUntil time.Time) error
@@ -217,36 +211,6 @@ func (r *peopleJobRepository) GetStats() (*PeopleJobStats, error) {
 func (r *peopleJobRepository) DeleteTerminalBefore(cutoff time.Time) (int64, error) {
 	result := r.db.Where("status IN ? AND updated_at < ?", []string{model.PeopleJobStatusCompleted, model.PeopleJobStatusFailed, model.PeopleJobStatusCancelled}, cutoff).
 		Delete(&model.PeopleJob{})
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	return result.RowsAffected, nil
-}
-
-// ListTerminalIDsBefore 返回早于 cutoff 的终态任务 ID，按 updated_at 升序排列，最多 limit 条。
-// 仅查询 completed/failed/cancelled，绝不包含 pending/queued/processing。
-func (r *peopleJobRepository) ListTerminalIDsBefore(cutoff time.Time, limit int) ([]uint, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-	var ids []uint
-	err := r.db.Model(&model.PeopleJob{}).
-		Where("status IN ? AND updated_at < ?", []string{model.PeopleJobStatusCompleted, model.PeopleJobStatusFailed, model.PeopleJobStatusCancelled}, cutoff).
-		Order("updated_at ASC").
-		Limit(limit).
-		Pluck("id", &ids).Error
-	if err != nil {
-		return nil, err
-	}
-	return ids, nil
-}
-
-// DeleteByIDs 按 ID 物理删除一批任务。空 ID 列表直接返回 0，避免生成无条件 DELETE。
-func (r *peopleJobRepository) DeleteByIDs(ids []uint) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	result := r.db.Where("id IN ?", ids).Delete(&model.PeopleJob{})
 	if result.Error != nil {
 		return 0, result.Error
 	}

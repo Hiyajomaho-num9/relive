@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -19,7 +18,6 @@ type TaskScheduler struct {
 	mergeSuggestionService  PersonMergeSuggestionService
 	thumbnailJobRepo        repository.ThumbnailJobRepository
 	geocodeJobRepo          repository.GeocodeJobRepository
-	peopleJobRepo           repository.PeopleJobRepository
 	writeQueue              *database.WriteQueue
 	stopCh                  chan struct{}
 	wg                      sync.WaitGroup
@@ -35,7 +33,6 @@ func NewTaskScheduler(
 	mergeSuggestionService PersonMergeSuggestionService,
 	thumbnailJobRepo repository.ThumbnailJobRepository,
 	geocodeJobRepo repository.GeocodeJobRepository,
-	peopleJobRepo repository.PeopleJobRepository,
 ) *TaskScheduler {
 	return &TaskScheduler{
 		analysisService:         analysisService,
@@ -44,7 +41,6 @@ func NewTaskScheduler(
 		mergeSuggestionService:  mergeSuggestionService,
 		thumbnailJobRepo:        thumbnailJobRepo,
 		geocodeJobRepo:          geocodeJobRepo,
-		peopleJobRepo:           peopleJobRepo,
 		writeQueue:              database.GetWriteQueue(),
 		stopCh:                  make(chan struct{}),
 	}
@@ -349,139 +345,4 @@ func (s *TaskScheduler) cleanTerminalJobs() {
 			logger.Infof("Cleaned %d terminal geocode jobs older than 7 days", count)
 		}
 	}
-
-	// 人物任务终态记录清理：分批物理删除，避免长事务/写锁
-	s.cleanTerminalPeopleJobs(cutoff)
-}
-
-// peopleJobsCleanupConfig 人物任务清理参数
-type peopleJobsCleanupConfig struct {
-	batchSize int // 每批删除 ID 数
-	maxPerRun int // 单次运行删除上限，历史积压多轮消化
-}
-
-// defaultPeopleJobsCleanupConfig 默认配置：每批 2000，单次上限 50000
-func defaultPeopleJobsCleanupConfig() peopleJobsCleanupConfig {
-	return peopleJobsCleanupConfig{
-		batchSize: 2000,
-		maxPerRun: 50000,
-	}
-}
-
-// cleanTerminalPeopleJobs 分批物理删除早于 cutoff 的终态人物任务（completed/failed/cancelled）。
-// 先分页查询待删除 ID，再按 ID 分批删除，每批独立短事务并通过写队列串行执行。
-// 设置单次运行删除上限，历史积压通过多轮调度任务逐步消化。
-func (s *TaskScheduler) cleanTerminalPeopleJobs(cutoff time.Time) {
-	if s.peopleJobRepo == nil {
-		return
-	}
-
-	cfg := defaultPeopleJobsCleanupConfig()
-	result := s.runPeopleJobsCleanup(cutoff, cfg)
-
-	// 可观测性日志：每次运行都记录截止时间、删除数量、批次数、总耗时、是否达上限、错误信息
-	errMsg := ""
-	if result.err != nil {
-		errMsg = result.err.Error()
-	}
-	logger.Infof(
-		"people jobs cleanup: cutoff=%s deleted=%d batches=%d elapsed=%s capped=%v err=%s",
-		cutoff.Format(time.RFC3339),
-		result.deleted,
-		result.batches,
-		result.elapsed.Round(time.Millisecond),
-		result.capped,
-		errMsg,
-	)
-	if result.err != nil {
-		logger.Errorf("Failed to clean terminal people jobs: %v", result.err)
-	}
-}
-
-// peopleJobsCleanupResult 一次清理运行的统计结果
-type peopleJobsCleanupResult struct {
-	deleted int64
-	batches int
-	capped  bool
-	elapsed time.Duration
-	err     error
-}
-
-// runPeopleJobsCleanup 执行实际的分批删除循环，返回统计结果。
-// 每批：查询至多 batchSize 个待删除 ID，通过写队列执行 DeleteByIDs（独立短事务）。
-// 达到 maxPerRun 或无更多待删除记录时停止。
-func (s *TaskScheduler) runPeopleJobsCleanup(cutoff time.Time, cfg peopleJobsCleanupConfig) peopleJobsCleanupResult {
-	start := time.Now()
-	res := peopleJobsCleanupResult{}
-
-	if cfg.batchSize <= 0 {
-		cfg.batchSize = 2000
-	}
-	if cfg.maxPerRun <= 0 {
-		cfg.maxPerRun = 50000
-	}
-
-	for res.deleted < int64(cfg.maxPerRun) {
-		// 响应停止信号：长积压场景下允许调度器停止时中途退出
-		select {
-		case <-s.stopCh:
-			res.elapsed = time.Since(start)
-			return res
-		default:
-		}
-
-		ids, err := s.peopleJobRepo.ListTerminalIDsBefore(cutoff, cfg.batchSize)
-		if err != nil {
-			res.err = fmt.Errorf("list terminal people job ids: %w", err)
-			res.elapsed = time.Since(start)
-			return res
-		}
-		if len(ids) == 0 {
-			break
-		}
-
-		var batchDeleted int64
-		deleteErr := s.executePeopleJobDelete(ids, &batchDeleted)
-		if deleteErr != nil {
-			res.err = fmt.Errorf("delete people jobs batch: %w", deleteErr)
-			res.elapsed = time.Since(start)
-			return res
-		}
-
-		res.deleted += batchDeleted
-		res.batches++
-
-		// 本批未填满 batch，说明已无更多待删除记录
-		if len(ids) < cfg.batchSize {
-			break
-		}
-	}
-
-	if res.deleted >= int64(cfg.maxPerRun) {
-		// 再确认是否仍有积压，标记 capped
-		remaining, err := s.peopleJobRepo.ListTerminalIDsBefore(cutoff, 1)
-		if err != nil {
-			res.err = fmt.Errorf("check remaining people jobs: %w", err)
-			res.elapsed = time.Since(start)
-			return res
-		}
-		res.capped = len(remaining) > 0
-	}
-
-	res.elapsed = time.Since(start)
-	return res
-}
-
-// executePeopleJobDelete 通过写队列串行执行单批删除（独立短事务）。
-func (s *TaskScheduler) executePeopleJobDelete(ids []uint, deleted *int64) error {
-	if s.writeQueue != nil {
-		return s.writeQueue.Execute(func() error {
-			n, err := s.peopleJobRepo.DeleteByIDs(ids)
-			*deleted = n
-			return err
-		})
-	}
-	n, err := s.peopleJobRepo.DeleteByIDs(ids)
-	*deleted = n
-	return err
 }

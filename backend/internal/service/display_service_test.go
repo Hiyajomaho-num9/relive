@@ -109,9 +109,6 @@ func (r *stubPhotoRepo) GetScatteredHighQuality(minBeauty int, excludeIDs []uint
 	return nil, nil
 }
 func (r *stubPhotoRepo) ListByFaceStatus(status string) ([]*model.Photo, error) { return nil, nil }
-func (r *stubPhotoRepo) CountActiveByFaceProcessStatuses(statuses []string) (int64, error) {
-	return 0, nil
-}
 func (r *stubPhotoRepo) ListPhotosByPersonID(personID uint) ([]*model.Photo, error) {
 	return nil, nil
 }

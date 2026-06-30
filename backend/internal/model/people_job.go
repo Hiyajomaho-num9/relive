@@ -21,10 +21,10 @@ const (
 type PeopleJob struct {
 	ID              uint       `gorm:"primarykey" json:"id"`
 	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `gorm:"index:idx_people_jobs_cleanup,priority:2" json:"updated_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 	PhotoID         uint       `gorm:"not null;index:idx_people_job_photo" json:"photo_id"`
 	FilePath        string     `gorm:"type:text;not null" json:"file_path"`
-	Status          string     `gorm:"type:varchar(20);index:idx_people_job_status;index:idx_people_job_claim,priority:1;index:idx_people_jobs_cleanup,priority:1;check:chk_people_job_status,status IN ('pending','queued','processing','completed','failed','cancelled')" json:"status"`
+	Status          string     `gorm:"type:varchar(20);index:idx_people_job_status;index:idx_people_job_claim,priority:1;check:chk_people_job_status,status IN ('pending','queued','processing','completed','failed','cancelled')" json:"status"`
 	Priority        int        `gorm:"not null;default:0;index:idx_people_job_priority;index:idx_people_job_claim,priority:2,sort:desc" json:"priority"`
 	Source          string     `gorm:"type:varchar(20);not null;check:chk_people_job_source,source IN ('scan','passive','manual')" json:"source"`
 	AttemptCount    int        `gorm:"not null;default:0" json:"attempt_count"`
