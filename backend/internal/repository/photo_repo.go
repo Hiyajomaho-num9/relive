@@ -31,7 +31,11 @@ type PhotoRepository interface {
 
 	// 列表查询
 	List(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.Photo, int64, error)
-	ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error)
+	ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error)
+	// CountWithFilters 按筛选条件统计照片总数（独立 COUNT 查询，供服务层缓存）
+	CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error)
+	// GetPhotoStats 一次聚合查询返回活跃照片总数、已分析数与总占用（供共享缓存使用）
+	GetPhotoStats() (total, analyzed, size int64, err error)
 	ListAll() ([]*model.Photo, error)
 	IterateActivePhotos(columns []string, batchSize int, fn func(photos []*model.Photo) error) error
 	ListByIDs(ids []uint) ([]*model.Photo, error)
@@ -300,20 +304,25 @@ func (r *photoRepository) List(page, pageSize int, analyzed *bool, hasThumbnail 
 	return photos, total, nil
 }
 
-// photoSummaryWithTotal 用于 COUNT(*) OVER() 查询
-type photoSummaryWithTotal struct {
-	model.PhotoSummary
-	TotalCount int64 `gorm:"column:total_count"`
-}
-
-// ListSummaries 分页列表查询（仅返回摘要字段，单次查询含总数）
-func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error) {
+// ListSummaries 分页列表查询（仅返回摘要字段）。
+// withTotal=false 时仅执行 ORDER BY ... LIMIT（不统计总数），用于 Dashboard 最近照片等
+// 无需总数的场景，避免 COUNT(*) OVER() 造成的全量物化与临时排序。
+// withTotal=true 时使用独立的 COUNT 查询获取总数（不再使用窗口函数）。
+func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error) {
 	if enabledPaths != nil && len(enabledPaths) == 0 {
 		return []*model.PhotoSummary{}, 0, nil
 	}
 
 	query := r.db.Model(&model.Photo{})
 	query = r.applyPhotoFilters(query, analyzed, hasThumbnail, hasGPS, location, search, category, tag, enabledPaths, status)
+
+	// 需要总数时使用独立 COUNT 查询（服务层会按筛选条件缓存该结果）
+	var total int64
+	if withTotal {
+		if err := query.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+	}
 
 	sortBy = sanitizeSortBy(sortBy)
 	orderClause := sortBy
@@ -324,8 +333,8 @@ func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasT
 	}
 
 	offset := (page - 1) * pageSize
-	var results []photoSummaryWithTotal
-	if err := query.Select("id, file_path, ai_analyzed, overall_score, thumbnail_status, location, gps_latitude, gps_longitude, taken_at, width, height, updated_at, COUNT(*) OVER() as total_count").
+	var results []model.PhotoSummary
+	if err := query.Select("id, file_path, ai_analyzed, overall_score, thumbnail_status, location, gps_latitude, gps_longitude, taken_at, width, height, updated_at").
 		Order(orderClause).
 		Offset(offset).
 		Limit(pageSize).
@@ -333,16 +342,42 @@ func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasT
 		return nil, 0, err
 	}
 
-	var total int64
 	summaries := make([]*model.PhotoSummary, len(results))
 	for i := range results {
-		summaries[i] = &results[i].PhotoSummary
-		if results[i].TotalCount > 0 {
-			total = results[i].TotalCount
-		}
+		summaries[i] = &results[i]
 	}
 
 	return summaries, total, nil
+}
+
+// CountWithFilters 按筛选条件统计照片总数（独立 COUNT 查询，供服务层按筛选条件缓存）。
+func (r *photoRepository) CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error) {
+	if enabledPaths != nil && len(enabledPaths) == 0 {
+		return 0, nil
+	}
+	query := r.db.Model(&model.Photo{})
+	query = r.applyPhotoFilters(query, analyzed, hasThumbnail, hasGPS, location, search, category, tag, enabledPaths, status)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// GetPhotoStats 一次聚合查询返回活跃照片总数、已分析数与总占用（供共享缓存使用）。
+func (r *photoRepository) GetPhotoStats() (total, analyzed, size int64, err error) {
+	var stats struct {
+		Total    int64 `gorm:"column:total"`
+		Analyzed int64 `gorm:"column:analyzed"`
+		Size     int64 `gorm:"column:size"`
+	}
+	if err := r.db.Model(&model.Photo{}).
+		Where("status = ?", model.PhotoStatusActive).
+		Select("COUNT(*) as total, SUM(CASE WHEN ai_analyzed = 1 THEN 1 ELSE 0 END) as analyzed, COALESCE(SUM(file_size), 0) as size").
+		Scan(&stats).Error; err != nil {
+		return 0, 0, 0, err
+	}
+	return stats.Total, stats.Analyzed, stats.Size, nil
 }
 
 // GetAdjacent 获取指定照片在同一筛选/排序条件下的前后相邻照片 ID

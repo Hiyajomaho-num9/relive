@@ -70,7 +70,9 @@ type AIService interface {
 	GetBackgroundLogs() []string
 
 	// GetAnalyzeProgress 获取分析进度
-	GetAnalyzeProgress() (*model.AIAnalyzeProgressResponse, error)
+	// lite=true 时复用共享照片统计缓存，不再独立执行 3 次 COUNT 全表扫描，
+	// 用于 Dashboard 场景（总数/已分析数由 /system/stats 与本接口共享同一缓存）。
+	GetAnalyzeProgress(lite bool) (*model.AIAnalyzeProgressResponse, error)
 
 	// GetTaskStatus 获取任务状态
 	GetTaskStatus() *AnalyzeTask
@@ -1293,24 +1295,43 @@ func (s *aiService) analyzeInBatchesAsync(task *AnalyzeTask, photos []*model.Pho
 	return successCount, failedCount, totalCost
 }
 
-// GetAnalyzeProgress 获取分析进度
-func (s *aiService) GetAnalyzeProgress() (*model.AIAnalyzeProgressResponse, error) {
-	// 统计总数
-	total, err := s.photoRepo.Count()
-	if err != nil {
-		return nil, fmt.Errorf("count total: %w", err)
-	}
+// GetAnalyzeProgress 获取分析进度。
+// lite=true 时复用 /system/stats 的共享照片统计缓存，跳过独立的 COUNT 全表扫描；
+// lite=false 时保持原有行为（独立统计总数/已分析/未分析），向后兼容。
+func (s *aiService) GetAnalyzeProgress(lite bool) (*model.AIAnalyzeProgressResponse, error) {
+	var total, analyzed, unanalyzed int64
 
-	// 统计已分析数
-	analyzed, err := s.photoRepo.CountAnalyzed()
-	if err != nil {
-		return nil, fmt.Errorf("count analyzed: %w", err)
-	}
-
-	// 统计未分析数
-	unanalyzed, err := s.photoRepo.CountUnanalyzed()
-	if err != nil {
-		return nil, fmt.Errorf("count unanalyzed: %w", err)
+	if lite {
+		snap, err := sharedPhotoStatsCache.get(func() (photoStatsSnapshot, error) {
+			t, a, size, err := s.photoRepo.GetPhotoStats()
+			if err != nil {
+				return photoStatsSnapshot{}, err
+			}
+			return photoStatsSnapshot{Total: t, Analyzed: a, Unanalyzed: t - a, Size: size}, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load photo stats: %w", err)
+		}
+		total, analyzed, unanalyzed = snap.Total, snap.Analyzed, snap.Unanalyzed
+	} else {
+		// 统计总数
+		t, err := s.photoRepo.Count()
+		if err != nil {
+			return nil, fmt.Errorf("count total: %w", err)
+		}
+		total = t
+		// 统计已分析数
+		a, err := s.photoRepo.CountAnalyzed()
+		if err != nil {
+			return nil, fmt.Errorf("count analyzed: %w", err)
+		}
+		analyzed = a
+		// 统计未分析数
+		u, err := s.photoRepo.CountUnanalyzed()
+		if err != nil {
+			return nil, fmt.Errorf("count unanalyzed: %w", err)
+		}
+		unanalyzed = u
 	}
 
 	// 计算进度百分比

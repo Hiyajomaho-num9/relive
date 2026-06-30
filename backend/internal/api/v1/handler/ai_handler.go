@@ -287,7 +287,10 @@ func (h *AIHandler) GetProgress(c *gin.Context) {
 	}
 
 	// 获取总体进度
-	progress, err := svc.GetAnalyzeProgress()
+	// Dashboard 场景传入 lite=true，复用 /system/stats 的共享照片统计缓存，
+	// 不再独立执行 COUNT 全表扫描；其他调用方保持默认行为。
+	lite := c.Query("lite") == "true"
+	progress, err := svc.GetAnalyzeProgress(lite)
 	if err != nil {
 		logger.Errorf("Get progress failed: %v", err)
 		c.JSON(http.StatusInternalServerError, model.Response{

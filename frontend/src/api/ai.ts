@@ -26,8 +26,9 @@ export const aiApi = {
   },
 
   // 获取分析进度
-  getProgress() {
-    return http.get<ApiResponse<AIAnalyzeProgress>>('/ai/progress')
+  // params.lite=true 时复用 /system/stats 的共享照片统计缓存，Dashboard 场景使用
+  getProgress(params?: { lite?: boolean }) {
+    return http.get<ApiResponse<AIAnalyzeProgress>>('/ai/progress', { params })
   },
 
   // 重新分析

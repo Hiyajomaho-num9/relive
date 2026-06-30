@@ -66,6 +66,7 @@ export interface PhotoListParams {
   sort_by?: string
   sort_desc?: boolean
   status?: string
+  no_total?: boolean
 }
 
 // 照片统计

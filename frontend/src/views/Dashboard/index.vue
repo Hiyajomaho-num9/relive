@@ -356,7 +356,8 @@ const formatDateTime = (dateStr?: string) => {
 
 const loadRecentPhotos = async () => {
   try {
-    const res = await photoApi.getList({ page: 1, page_size: 12 })
+    // Dashboard 只展示最近 12 张照片，无需总数；传 no_total 跳过后端 COUNT 查询
+    const res = await photoApi.getList({ page: 1, page_size: 12, no_total: true })
     recentPhotos.value = res.data?.data?.items || []
   } catch (error) {
     console.error('Failed to load recent photos:', error)
@@ -365,7 +366,8 @@ const loadRecentPhotos = async () => {
 
 const loadAIProgress = async () => {
   try {
-    const res = await aiApi.getProgress()
+    // lite=true：复用 /system/stats 的共享照片统计缓存，不再独立执行全表 COUNT
+    const res = await aiApi.getProgress({ lite: true })
     aiProgress.value = res.data?.data || null
     analyzing.value = Boolean(aiProgress.value?.is_running)
   } catch (error: any) {

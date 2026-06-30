@@ -53,22 +53,16 @@ func (s *systemService) Ping() error {
 func (s *systemService) GetStats() (*model.SystemStatsResponse, time.Time, error) {
 	var stats model.SystemStatsResponse
 
-	// 照片统计：一条 SQL 同时获取总数、已分析数、存储空间
-	var photoStats struct {
-		Total    int64 `gorm:"column:total"`
-		Analyzed int64 `gorm:"column:analyzed"`
-		Size     int64 `gorm:"column:size"`
-	}
-	if err := s.db.Model(&model.Photo{}).
-		Where("status = ?", model.PhotoStatusActive).
-		Select("COUNT(*) as total, SUM(CASE WHEN ai_analyzed = 1 THEN 1 ELSE 0 END) as analyzed, COALESCE(SUM(file_size), 0) as size").
-		Scan(&photoStats).Error; err != nil {
+	// 照片统计走共享缓存（与 /ai/progress lite 模式复用），避免 Dashboard 并发打开时
+	// 重复对照片表执行全量聚合统计。
+	snap, err := sharedPhotoStatsCache.get(s.loadPhotoStats)
+	if err != nil {
 		return nil, s.startTime, fmt.Errorf("query photo stats: %w", err)
 	}
-	stats.TotalPhotos = photoStats.Total
-	stats.AnalyzedPhotos = photoStats.Analyzed
-	stats.UnanalyzedPhotos = photoStats.Total - photoStats.Analyzed
-	stats.StorageSize = photoStats.Size
+	stats.TotalPhotos = snap.Total
+	stats.AnalyzedPhotos = snap.Analyzed
+	stats.UnanalyzedPhotos = snap.Unanalyzed
+	stats.StorageSize = snap.Size
 
 	// 设备统计：一条 SQL 同时获取总数和在线数
 	fiveMinutesAgo := time.Now().Add(-5 * time.Minute)
@@ -90,6 +84,27 @@ func (s *systemService) GetStats() (*model.SystemStatsResponse, time.Time, error
 	}
 
 	return &stats, s.startTime, nil
+}
+
+// loadPhotoStats 从数据库加载照片统计快照（供共享缓存 miss 时调用）。
+func (s *systemService) loadPhotoStats() (photoStatsSnapshot, error) {
+	var photoStats struct {
+		Total    int64 `gorm:"column:total"`
+		Analyzed int64 `gorm:"column:analyzed"`
+		Size     int64 `gorm:"column:size"`
+	}
+	if err := s.db.Model(&model.Photo{}).
+		Where("status = ?", model.PhotoStatusActive).
+		Select("COUNT(*) as total, SUM(CASE WHEN ai_analyzed = 1 THEN 1 ELSE 0 END) as analyzed, COALESCE(SUM(file_size), 0) as size").
+		Scan(&photoStats).Error; err != nil {
+		return photoStatsSnapshot{}, err
+	}
+	return photoStatsSnapshot{
+		Total:      photoStats.Total,
+		Analyzed:   photoStats.Analyzed,
+		Unanalyzed: photoStats.Total - photoStats.Analyzed,
+		Size:       photoStats.Size,
+	}, nil
 }
 
 func (s *systemService) ResetSystem() error {

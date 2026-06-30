@@ -203,6 +203,11 @@ func (s *photoService) CleanupNonExistentPhotos() (*model.CleanupPhotosResponse,
 
 	logger.Infof("Photo cleanup completed: total=%d, deleted=%d, skipped=%d", totalCount, deletedCount, skippedCount)
 
+	if deletedCount > 0 {
+		s.invalidateFilteredCountCache()
+		invalidatePhotoStatsCache()
+	}
+
 	return &model.CleanupPhotosResponse{
 		TotalCount:   totalCount,
 		DeletedCount: deletedCount,
@@ -748,6 +753,11 @@ func (s *photoService) finishScanTask(runtime *activeScanJob, progress *scanProg
 	}); err != nil {
 		logger.Warnf("[Task %s] Finalize scan task failed: %v", runtime.id, err)
 	}
+
+	// 扫描/重建会新增、更新或删除照片，失效照片计数相关缓存，
+	// 使扫描完成后的 Dashboard 刷新立即拿到最新计数（而非等待 TTL 过期）。
+	s.invalidateFilteredCountCache()
+	invalidatePhotoStatsCache()
 }
 
 func scanJobToTask(job *model.ScanJob) *model.ScanTask {

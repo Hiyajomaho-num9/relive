@@ -609,3 +609,118 @@ func TestPhotoRepositoryRecomputeTopPersonCategory_Rollback(t *testing.T) {
 		assert.Equal(t, snap.UpdatedAt, got.UpdatedAt, "photo %d updated_at should be unchanged", p.ID)
 	}
 }
+
+// TestPhotoRepository_ListSummaries_NoTotal 验证 withTotal=false 时不执行 COUNT、total 恒为 0。
+func TestPhotoRepository_ListSummaries_NoTotal(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 15; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i%2 == 0,
+		}))
+	}
+
+	// withTotal=false：不统计总数
+	summaries, total, err := repo.ListSummaries(1, 10, nil, nil, nil, "", "", "", "", "id", false, nil, "", false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total, "withTotal=false should skip COUNT")
+	assert.Len(t, summaries, 10)
+
+	// withTotal=true：独立 COUNT 查询返回正确总数（不再使用 COUNT(*) OVER()）
+	summaries, total, err = repo.ListSummaries(1, 10, nil, nil, nil, "", "", "", "", "id", false, nil, "", true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), total)
+	assert.Len(t, summaries, 10)
+}
+
+// TestPhotoRepository_ListSummaries_WithTotal_Filtered 验证筛选条件下 withTotal 的独立 COUNT 正确。
+func TestPhotoRepository_ListSummaries_WithTotal_Filtered(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 4, // 4 张已分析
+		}))
+	}
+
+	analyzed := true
+	_, total, err := repo.ListSummaries(1, 10, &analyzed, nil, nil, "", "", "", "", "id", false, nil, "", true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), total)
+}
+
+// TestPhotoRepository_CountWithFilters 验证按筛选条件独立 COUNT。
+func TestPhotoRepository_CountWithFilters(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 3, // 3 张已分析
+		}))
+	}
+
+	// 无筛选：全部 10 张
+	total, err := repo.CountWithFilters(nil, nil, nil, "", "", "", "", nil, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), total)
+
+	// 已分析筛选：3 张
+	analyzed := true
+	total, err = repo.CountWithFilters(&analyzed, nil, nil, "", "", "", "", nil, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	// 空路径数组：0
+	total, err = repo.CountWithFilters(nil, nil, nil, "", "", "", "", []string{}, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+}
+
+// TestPhotoRepository_GetPhotoStats 验证一次聚合查询返回总数/已分析/占用。
+func TestPhotoRepository_GetPhotoStats(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 6; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1000,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 2, // 2 张已分析
+		}))
+	}
+
+	total, analyzed, size, err := repo.GetPhotoStats()
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), total)
+	assert.Equal(t, int64(2), analyzed)
+	assert.Equal(t, int64(6000), size)
+}

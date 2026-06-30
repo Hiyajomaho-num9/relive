@@ -116,8 +116,16 @@ func (r *stubPhotoRepo) ListPhotoSummariesByPersonID(personID uint) ([]*model.Ph
 func (r *stubPhotoRepo) ListPhotoSummariesByPersonIDPaginated(personID uint, page, pageSize int) ([]*model.Photo, int64, error) {
 	return nil, 0, nil
 }
-func (r *stubPhotoRepo) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error) {
+func (r *stubPhotoRepo) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error) {
 	return nil, 0, nil
+}
+
+func (r *stubPhotoRepo) CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error) {
+	return 0, nil
+}
+
+func (r *stubPhotoRepo) GetPhotoStats() (total, analyzed, size int64, err error) {
+	return 0, 0, 0, nil
 }
 
 func TestNormalizeDisplayStrategyConfig_MergesSmartIntoOnThisDay(t *testing.T) {

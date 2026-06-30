@@ -237,3 +237,78 @@ func TestAIService_AnalyzePhoto_DoesNotOverwritePeopleFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, faces, 1)
 }
+
+// TestAIService_GetAnalyzeProgress_Lite 验证 lite 模式复用共享缓存，
+// 与非 lite 模式返回一致的计数，且会填充共享照片统计缓存。
+func TestAIService_GetAnalyzeProgress_Lite(t *testing.T) {
+	db := setupPeopleServiceTestDB(t)
+	photoRepo := repository.NewPhotoRepository(db)
+
+	now := time.Now()
+	require.NoError(t, photoRepo.Create(&model.Photo{FilePath: "/a.jpg", FileHash: "h1", FileSize: 1000, AIAnalyzed: true, AnalyzedAt: &now}))
+	require.NoError(t, photoRepo.Create(&model.Photo{FilePath: "/b.jpg", FileHash: "h2", FileSize: 2000, AIAnalyzed: true, AnalyzedAt: &now}))
+	require.NoError(t, photoRepo.Create(&model.Photo{FilePath: "/c.jpg", FileHash: "h3", FileSize: 3000, AIAnalyzed: false}))
+
+	svc := &aiService{
+		photoRepo: photoRepo,
+		config:    &config.Config{AI: config.AIConfig{Provider: "ollama"}},
+	}
+
+	// 清空共享缓存，确保 lite 模式确实会触发加载
+	invalidatePhotoStatsCache()
+
+	// 非 lite：3 次独立 COUNT
+	full, err := svc.GetAnalyzeProgress(false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), full.Total)
+	assert.Equal(t, int64(2), full.Analyzed)
+	assert.Equal(t, int64(1), full.Unanalyzed)
+
+	// lite：复用共享缓存（GetPhotoStats 单次聚合），结果一致
+	lite, err := svc.GetAnalyzeProgress(true)
+	require.NoError(t, err)
+	assert.Equal(t, full.Total, lite.Total)
+	assert.Equal(t, full.Analyzed, lite.Analyzed)
+	assert.Equal(t, full.Unanalyzed, lite.Unanalyzed)
+
+	// lite 调用后共享缓存应已被填充
+	sharedPhotoStatsCache.mu.RLock()
+	filled := sharedPhotoStatsCache.snapshot != nil
+	sharedPhotoStatsCache.mu.RUnlock()
+	assert.True(t, filled, "lite mode should populate shared photo stats cache")
+
+	invalidatePhotoStatsCache()
+}
+
+// TestAIService_GetAnalyzeProgress_Lite_ReusesCache 验证 lite 模式命中缓存时不再查询 DB。
+// 通过删除所有照片后立即调用 lite：若命中缓存，计数仍为旧值。
+func TestAIService_GetAnalyzeProgress_Lite_ReusesCache(t *testing.T) {
+	db := setupPeopleServiceTestDB(t)
+	photoRepo := repository.NewPhotoRepository(db)
+
+	now := time.Now()
+	require.NoError(t, photoRepo.Create(&model.Photo{FilePath: "/a.jpg", FileHash: "h1", FileSize: 1000, AIAnalyzed: true, AnalyzedAt: &now}))
+
+	svc := &aiService{
+		photoRepo: photoRepo,
+		config:    &config.Config{AI: config.AIConfig{Provider: "ollama"}},
+	}
+	invalidatePhotoStatsCache()
+
+	// 首次 lite 调用填充缓存：total=1
+	first, err := svc.GetAnalyzeProgress(true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), first.Total)
+
+	// 删除照片后再次 lite：缓存未过期，应返回缓存值 1（而非查 DB 得到 0）
+	require.NoError(t, photoRepo.Delete(1))
+	cached, err := svc.GetAnalyzeProgress(true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), cached.Total, "lite should serve from cache within TTL")
+
+	// 失效后应重新查询得到 0
+	invalidatePhotoStatsCache()
+	refreshed, err := svc.GetAnalyzeProgress(true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), refreshed.Total)
+}

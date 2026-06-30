@@ -51,6 +51,7 @@ type GetPhotosRequest struct {
 	SortBy       string `form:"sort_by"`       // 排序字段（taken_at/overall_score）
 	SortDesc     bool   `form:"sort_desc"`     // 是否降序
 	Status       string `form:"status"`        // 状态筛选：active(默认)/excluded/all
+	NoTotal      bool   `form:"no_total"`      // 不统计总数（Dashboard 最近照片等场景，跳过 COUNT 查询）
 }
 
 // AdjacentPhotosResponse 相邻照片响应
