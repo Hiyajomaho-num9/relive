@@ -462,6 +462,11 @@ type PeopleStatsResponse struct {
 	PendingFacesNeverClustered int64 `json:"pending_faces_never_clustered"`
 	PendingFacesRetried        int64 `json:"pending_faces_retried"`
 	TotalFaces                 int64 `json:"total_faces"`
+	// DetectedPhotos 已检测照片数（按照片当前 face_process_status 计算：ready/no_face/failed），
+	// 独立于 people_jobs 任务明细，清理终态任务后仍保持一致。
+	DetectedPhotos int64 `json:"detected_photos"`
+	// PendingPhotos 待检测照片数（face_process_status 为 none/pending/processing 的活跃照片）。
+	PendingPhotos int64 `json:"pending_photos"`
 }
 
 type PersonMergeSuggestionTask struct {

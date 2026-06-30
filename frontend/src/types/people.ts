@@ -64,6 +64,10 @@ export interface PeopleStats {
   pending_faces_never_clustered: number
   pending_faces_retried: number
   total_faces: number
+  // 已检测照片数（按照片当前 face_process_status 计算，独立于任务明细）
+  detected_photos: number
+  // 待检测照片数（face_process_status 为 none/pending/processing 的活跃照片）
+  pending_photos: number
 }
 
 export interface PeopleBackgroundLogsResponse {

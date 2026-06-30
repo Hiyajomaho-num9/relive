@@ -332,6 +332,24 @@ func (s *peopleService) GetStats() (*model.PeopleStatsResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 已检测/待检测照片数来自照片当前 face_process_status，独立于 people_jobs 任务明细，
+	// 清理终态任务后仍保持一致（任务明细 completed/failed/cancelled 仅含保留期内数据）。
+	detectedPhotos, err := s.photoRepo.CountActiveByFaceProcessStatuses([]string{
+		model.FaceProcessStatusReady,
+		model.FaceProcessStatusNoFace,
+		model.FaceProcessStatusFailed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	pendingPhotos, err := s.photoRepo.CountActiveByFaceProcessStatuses([]string{
+		model.FaceProcessStatusNone,
+		model.FaceProcessStatusPending,
+		model.FaceProcessStatusProcessing,
+	})
+	if err != nil {
+		return nil, err
+	}
 	result := &model.PeopleStatsResponse{
 		Total:                      stats.Total,
 		Pending:                    stats.Pending,
@@ -344,6 +362,8 @@ func (s *peopleService) GetStats() (*model.PeopleStatsResponse, error) {
 		PendingFacesNeverClustered: pendingFaceStats.NeverClustered,
 		PendingFacesRetried:        pendingFaceStats.Retried,
 		TotalFaces:                 pendingFaceStats.TotalFaces,
+		DetectedPhotos:             detectedPhotos,
+		PendingPhotos:              pendingPhotos,
 	}
 
 	s.statsCacheMu.Lock()

@@ -143,6 +143,18 @@ func TestAutoMigrateAddsPeopleFeedbackIndexes(t *testing.T) {
 	}
 }
 
+func TestAutoMigrateAddsPeopleJobsCleanupIndex(t *testing.T) {
+	db := openMigratedTestDB(t)
+
+	var count int64
+	if err := db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", "idx_people_jobs_cleanup").Scan(&count).Error; err != nil {
+		t.Fatalf("query idx_people_jobs_cleanup: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected idx_people_jobs_cleanup to exist after migration")
+	}
+}
+
 func TestAutoMigrateAddsPersonMergeSuggestionTables(t *testing.T) {
 	db := openMigratedTestDB(t)
 

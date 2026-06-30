@@ -272,6 +272,10 @@ func AutoMigrate(db *gorm.DB) error {
 		log.Printf("[database] warning: merge suggestion index migration failed: %v", err)
 	}
 
+	if err := migratePeopleJobsCleanupIndex(db); err != nil {
+		log.Printf("[database] warning: people jobs cleanup index migration failed: %v", err)
+	}
+
 	return nil
 }
 
@@ -648,6 +652,29 @@ func migrateMergeSuggestionIndex(db *gorm.DB) error {
 	}
 
 	log.Printf("[database] merge suggestion targets index created")
+	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
+	return nil
+}
+
+// migratePeopleJobsCleanupIndex 创建 (status, updated_at) 复合索引，供终态任务清理查询使用，
+// 避免扫描全部 people_jobs 记录。GORM tag 也会在新库上创建同名索引，这里用 app_config 标记
+// 保证已存在的线上库也能补建。
+func migratePeopleJobsCleanupIndex(db *gorm.DB) error {
+	const migrationKey = "migration.people_jobs_cleanup_index_v1"
+
+	var cfg model.AppConfig
+	if err := db.Where("key = ?", migrationKey).First(&cfg).Error; err == nil {
+		return nil
+	}
+
+	log.Printf("[database] creating people_jobs cleanup index (status, updated_at)...")
+
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_people_jobs_cleanup
+		ON people_jobs(status, updated_at)`).Error; err != nil {
+		return fmt.Errorf("create people_jobs cleanup index: %w", err)
+	}
+
+	log.Printf("[database] people_jobs cleanup index created")
 	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
 	return nil
 }

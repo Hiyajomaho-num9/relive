@@ -99,6 +99,9 @@ type PhotoRepository interface {
 
 	// 人物系统
 	ListByFaceStatus(status string) ([]*model.Photo, error)
+	// CountActiveByFaceProcessStatuses 统计指定人脸处理状态下的活跃照片数，
+	// 供人物页面“已检测/待处理”等业务统计使用（独立于 people_jobs 任务明细）。
+	CountActiveByFaceProcessStatuses(statuses []string) (int64, error)
 
 	// 手动旋转
 	UpdateManualRotation(id uint, rotation int) error
@@ -830,6 +833,20 @@ func (r *photoRepository) ListByFaceStatus(status string) ([]*model.Photo, error
 	var photos []*model.Photo
 	err := r.db.Where("face_process_status = ? AND status = ?", status, model.PhotoStatusActive).Find(&photos).Error
 	return photos, err
+}
+
+// CountActiveByFaceProcessStatuses 统计活跃照片中人脸处理状态命中 statuses 的数量。
+// 利用 idx_face_process_status 索引；空 statuses 返回 0，避免生成无条件 COUNT。
+func (r *photoRepository) CountActiveByFaceProcessStatuses(statuses []string) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err := r.db.Model(&model.Photo{}).
+		Scopes(activeScope).
+		Where("face_process_status IN ?", statuses).
+		Count(&count).Error
+	return count, err
 }
 
 // CountByPathPrefix 统计指定路径前缀的照片数量
