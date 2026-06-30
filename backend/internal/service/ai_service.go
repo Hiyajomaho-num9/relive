@@ -57,6 +57,10 @@ type AIService interface {
 	// ReAnalyzePhoto 重新分析照片（强制重新分析已分析的照片）
 	ReAnalyzePhoto(photoID uint) error
 
+	// AnalyzePhotoAsync 异步分析单张照片（同步预检 + 后台执行，立即返回）
+	// 预检错误同步返回；AI 分析在后台 goroutine 运行，结果落库后由前端轮询感知。
+	AnalyzePhotoAsync(photoID uint, force bool) error
+
 	// AnalyzeBatch 批量分析照片（异步启动）
 	AnalyzeBatch(limit int) (*AnalyzeTask, error)
 
@@ -558,31 +562,72 @@ func (s *aiService) ReAnalyzePhoto(photoID uint) error {
 	return s.analyzePhotoInternal(photoID, true)
 }
 
-// analyzePhotoInternal 内部分析方法
-// force: 是否强制重新分析已分析的照片
-func (s *aiService) analyzePhotoInternal(photoID uint, force bool) error {
+// AnalyzePhotoAsync 异步分析单张照片：同步预检后后台执行，立即返回。
+// 预检错误（provider 未配置、照片不存在/已排除/未就绪）同步返回；
+// AI 分析本身在后台 goroutine 中运行，结果写入数据库，由前端轮询感知。
+// 采用异步是为了避免单张分析耗时数分钟时，同步 HTTP 长连接被反向代理/网关切断（504）。
+func (s *aiService) AnalyzePhotoAsync(photoID uint, force bool) error {
+	photo, err := s.validatePhotoForAnalysis(photoID, force)
+	if err != nil {
+		return err
+	}
+	if photo == nil {
+		// 已分析且非强制，跳过
+		return nil
+	}
+	if force {
+		logger.Infof("Re-analyzing photo %d (force mode, async)", photoID)
+	} else {
+		logger.Infof("Analyzing photo %d (async)", photoID)
+	}
+	go func() {
+		if err := s.analyzePhotoInternal(photoID, force); err != nil {
+			logger.Errorf("Async analyze photo %d failed: %v", photoID, err)
+		}
+	}()
+	return nil
+}
+
+// validatePhotoForAnalysis 同步预检照片是否可分析：provider 已配置、照片存在、未排除、就绪。
+// 返回 (nil, nil) 表示「已分析且非强制」需跳过，不视为错误。
+func (s *aiService) validatePhotoForAnalysis(photoID uint, force bool) (*model.Photo, error) {
 	if s.provider == nil {
-		return fmt.Errorf("AI provider not configured")
+		return nil, fmt.Errorf("AI provider not configured")
 	}
 
 	// 获取照片信息
 	photo, err := s.photoRepo.GetByID(photoID)
 	if err != nil {
-		return fmt.Errorf("get photo: %w", err)
+		return nil, fmt.Errorf("get photo: %w", err)
 	}
 
 	if photo.Status == model.PhotoStatusExcluded {
-		return fmt.Errorf("photo %d is excluded", photoID)
+		return nil, fmt.Errorf("photo %d is excluded", photoID)
 	}
 
 	// 检查是否已分析（非强制模式下跳过已分析的照片）
 	if photo.AIAnalyzed && !force {
 		logger.Warnf("Photo %d already analyzed, skipping", photoID)
-		return nil
+		return nil, nil
 	}
 
 	if !isPhotoReadyForAI(photo) {
-		return fmt.Errorf("photo %d is not ready for ai analysis: %s", photoID, photoNotReadyReason(photo))
+		return nil, fmt.Errorf("photo %d is not ready for ai analysis: %s", photoID, photoNotReadyReason(photo))
+	}
+
+	return photo, nil
+}
+
+// analyzePhotoInternal 内部分析方法
+// force: 是否强制重新分析已分析的照片
+func (s *aiService) analyzePhotoInternal(photoID uint, force bool) error {
+	photo, err := s.validatePhotoForAnalysis(photoID, force)
+	if err != nil {
+		return err
+	}
+	if photo == nil {
+		// 已分析且非强制，跳过
+		return nil
 	}
 
 	// 获取图片数据（优先使用缩略图）
