@@ -45,7 +45,7 @@ func newAutoScanTestService(t *testing.T, rootPath string) (*photoService, Confi
 	cfg.Photos.SupportedFormats = []string{".jpg", ".jpeg", ".png", ".heic"}
 	cfg.Photos.ThumbnailPath = filepath.Join(rootPath, ".thumbnails")
 	cfg.Performance.MaxScanWorkers = 1
-	service := NewPhotoService(photoRepo, nil, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	service := NewPhotoService(photoRepo, nil, db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
 	return service, configService
 }
 
@@ -518,7 +518,7 @@ func newPhotoServiceForList(t *testing.T) (*photoService, repository.PhotoReposi
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.ScanJob{}, &model.AppConfig{}))
+	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.PhotoTagStats{}, &model.ScanJob{}, &model.AppConfig{}))
 	t.Cleanup(func() {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
@@ -529,7 +529,7 @@ func newPhotoServiceForList(t *testing.T) (*photoService, repository.PhotoReposi
 	configService := NewConfigService(repository.NewConfigRepository(db))
 	scanJobRepo := repository.NewScanJobRepository(db)
 	cfg := &config.Config{Photos: config.PhotosConfig{ThumbnailPath: t.TempDir()}}
-	svc := NewPhotoService(photoRepo, nil, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	svc := NewPhotoService(photoRepo, nil, db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
 	return svc, photoRepo
 }
 
@@ -539,7 +539,7 @@ func newPhotoServicePure(t *testing.T) (PhotoService, repository.PhotoRepository
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
-	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.ScanJob{}, &model.AppConfig{}))
+	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.PhotoTagStats{}, &model.ScanJob{}, &model.AppConfig{}))
 	t.Cleanup(func() {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
@@ -552,7 +552,7 @@ func newPhotoServicePure(t *testing.T) (PhotoService, repository.PhotoRepository
 	cfg := &config.Config{
 		Photos: config.PhotosConfig{ThumbnailPath: t.TempDir()},
 	}
-	svc := NewPhotoService(photoRepo, photoTagRepo, scanJobRepo, cfg, nil, nil, nil, nil)
+	svc := NewPhotoService(photoRepo, photoTagRepo, db, scanJobRepo, cfg, nil, nil, nil, nil)
 	return svc, photoRepo, photoTagRepo
 }
 
@@ -692,6 +692,49 @@ func TestPhotoService_DeletePhotosByPathPrefix(t *testing.T) {
 	total, _ := svc.CountAll()
 	assert.Equal(t, int64(1), total)
 }
+
+// TestPhotoService_DeleteCleansTagStats 验证删除照片时同步清理 photo_tags 与统计表。
+func TestPhotoService_DeleteCleansTagStats(t *testing.T) {
+	svc, repo, tagRepo := newPhotoServicePure(t)
+	repo.Create(&model.Photo{FilePath: "/photos/a.jpg", FileHash: "h1"})
+	repo.Create(&model.Photo{FilePath: "/photos/b.jpg", FileHash: "h2"})
+	tagRepo.SyncTags(1, "nature,sky")
+	tagRepo.SyncTags(2, "nature,city")
+	// nature=2, sky=1, city=1
+
+	_, err := svc.DeletePhotosByPathPrefix("/photos/")
+	require.NoError(t, err)
+
+	tags, total, err := svc.GetTags("", 50)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+	assert.Empty(t, tags)
+
+	// photo_tags 明细也应清空（无孤儿）
+	var photoTagCount int64
+	require.NoError(t, svc.(*photoService).db.Table("photo_tags").Count(&photoTagCount).Error)
+	assert.Equal(t, int64(0), photoTagCount)
+}
+
+// TestPhotoService_RebuildTagStats 验证重建方法修复漂移。
+func TestPhotoService_RebuildTagStats(t *testing.T) {
+	svc, repo, tagRepo := newPhotoServicePure(t)
+	repo.Create(&model.Photo{FilePath: "/a.jpg", FileHash: "h1"})
+	tagRepo.SyncTags(1, "nature,sky")
+
+	// 人为破坏统计
+	ps := svc.(*photoService)
+	require.NoError(t, ps.db.Exec(`UPDATE photo_tag_stats SET photo_count = 999`).Error)
+
+	require.NoError(t, svc.RebuildTagStats())
+
+	tags, _, err := svc.GetTags("", 50)
+	require.NoError(t, err)
+	for _, tc := range tags {
+		assert.Equal(t, 1, tc.Count)
+	}
+}
+
 
 func TestPhotoService_GetPhotosByPathPrefix(t *testing.T) {
 	svc, repo, _ := newPhotoServicePure(t)

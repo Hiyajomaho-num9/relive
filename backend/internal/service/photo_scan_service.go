@@ -183,7 +183,7 @@ func (s *photoService) CleanupNonExistentPhotos() (*model.CleanupPhotosResponse,
 		for _, photo := range photos {
 			if _, err := os.Stat(photo.FilePath); os.IsNotExist(err) {
 				if err := s.executeWrite(func() error {
-					return s.repo.Delete(photo.ID)
+					return s.deletePhotoAndTags(photo.ID)
 				}); err != nil {
 					logger.Errorf("Soft delete photo failed: id=%d, path=%s, error=%v", photo.ID, photo.FilePath, err)
 					continue
@@ -467,7 +467,7 @@ func (s *photoService) runScanTask(runtime *activeScanJob, path string, rebuild 
 				continue
 			}
 			if err := s.executeWrite(func() error {
-					return s.repo.Delete(existing.ID)
+					return s.deletePhotoAndTags(existing.ID)
 				}); err != nil {
 				logger.Warnf("[Task %s] Delete missing photo failed: %v", runtime.id, err)
 				continue

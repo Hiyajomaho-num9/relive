@@ -65,7 +65,7 @@ func NewServices(repos *repository.Repositories, cfg *config.Config, db *gorm.DB
 	analysisService := NewAnalysisService(db, repos.Photo, repos.PhotoTag, cfg)
 	thumbnailService := NewThumbnailService(db, repos.Photo, repos.ThumbnailJob, cfg)
 	geocodeTaskService := NewGeocodeTaskService(db, repos.Photo, repos.GeocodeJob, geocodeService)
-	photoService := NewPhotoService(repos.Photo, repos.PhotoTag, repos.ScanJob, cfg, configService, geocodeService, thumbnailService, geocodeTaskService)
+	photoService := NewPhotoService(repos.Photo, repos.PhotoTag, db, repos.ScanJob, cfg, configService, geocodeService, thumbnailService, geocodeTaskService)
 	var peopleClient PeopleMLClient
 	if cfg != nil && cfg.People.MLEndpoint != "" {
 		peopleClient = mlclient.New(cfg.People.MLEndpoint, time.Duration(cfg.People.Timeout)*time.Second)

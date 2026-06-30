@@ -181,6 +181,7 @@ func AutoMigrate(db *gorm.DB) error {
 	models := []interface{}{
 		&model.Photo{},
 		&model.PhotoTag{},
+		&model.PhotoTagStats{},
 		&model.Person{},
 		&model.Face{},
 		&model.PeopleJob{},
@@ -232,6 +233,10 @@ func AutoMigrate(db *gorm.DB) error {
 
 	if err := migratePhotoTagsTable(db); err != nil {
 		return err
+	}
+
+	if err := migratePhotoTagStatsTable(db); err != nil {
+		log.Printf("[database] warning: photo_tag_stats migration failed: %v", err)
 	}
 
 	if err := migrateFTS5Table(db); err != nil {
@@ -353,6 +358,58 @@ func migratePhotoTagsTable(db *gorm.DB) error {
 	// 标记已迁移
 	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
 	return nil
+}
+
+// migratePhotoTagStatsTable 从 photo_tags 全量聚合生成 photo_tag_stats 预聚合统计表。
+// 幂等：已迁移则跳过；ON CONFLICT 保证重复执行也安全。
+func migratePhotoTagStatsTable(db *gorm.DB) error {
+	const migrationKey = "migration.photo_tag_stats_v1"
+
+	var cfg model.AppConfig
+	if err := db.Where("key = ?", migrationKey).First(&cfg).Error; err == nil {
+		return nil // 已迁移
+	}
+
+	log.Printf("[database] building photo_tag_stats from photo_tags...")
+
+	// 全量聚合：每标签一行，photo_count = COUNT(*)
+	if err := db.Exec(
+		`INSERT INTO photo_tag_stats(tag, photo_count, updated_at)
+		 SELECT tag, COUNT(*), ?
+		   FROM photo_tags
+		  GROUP BY tag
+		 ON CONFLICT(tag) DO UPDATE SET photo_count = excluded.photo_count, updated_at = excluded.updated_at`,
+		time.Now(),
+	).Error; err != nil {
+		return err
+	}
+
+	// 清理可能的零计数残留
+	if err := db.Exec(`DELETE FROM photo_tag_stats WHERE photo_count <= 0`).Error; err != nil {
+		return err
+	}
+
+	log.Printf("[database] photo_tag_stats built")
+
+	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
+	return nil
+}
+
+// RebuildPhotoTagStats 全量重建标签统计表，用于修复历史数据或异常漂移。可重复执行。
+// 在单一事务内清空并重新聚合，保证与 photo_tags 完全一致。
+func RebuildPhotoTagStats(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`DELETE FROM photo_tag_stats`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(
+			`INSERT INTO photo_tag_stats(tag, photo_count, updated_at)
+			 SELECT tag, COUNT(*), ?
+			   FROM photo_tags
+			  GROUP BY tag`,
+			time.Now(),
+		).Error
+	})
 }
 
 // migrateFTS5Table 创建 FTS5 全文搜索虚拟表和同步触发器

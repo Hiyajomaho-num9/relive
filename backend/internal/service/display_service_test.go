@@ -9,6 +9,7 @@ import (
 	"github.com/davidhoo/relive/pkg/config"
 	"github.com/davidhoo/relive/pkg/logger"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestMain(m *testing.M) {
@@ -29,6 +30,7 @@ func (r *stubPhotoRepo) Create(photo *model.Photo) error                        
 func (r *stubPhotoRepo) Update(photo *model.Photo) error                           { return nil }
 func (r *stubPhotoRepo) UpdateFields(id uint, fields map[string]interface{}) error { return nil }
 func (r *stubPhotoRepo) Delete(id uint) error                                      { return nil }
+func (r *stubPhotoRepo) DeleteTx(tx *gorm.DB, id uint) error                      { return nil }
 func (r *stubPhotoRepo) GetByID(id uint) (*model.Photo, error)                     { return nil, nil }
 func (r *stubPhotoRepo) GetByFilePath(filePath string) (*model.Photo, error)       { return nil, nil }
 func (r *stubPhotoRepo) GetByFileHash(fileHash string) (*model.Photo, error)       { return nil, nil }

@@ -23,6 +23,8 @@ type PhotoRepository interface {
 	Update(photo *model.Photo) error
 	UpdateFields(id uint, fields map[string]interface{}) error
 	Delete(id uint) error
+	// DeleteTx 在已有事务内删除照片（用于跨表原子删除）
+	DeleteTx(tx *gorm.DB, id uint) error
 	GetByID(id uint) (*model.Photo, error)
 	GetByFilePath(filePath string) (*model.Photo, error)
 	GetByFileHash(fileHash string) (*model.Photo, error)
@@ -137,6 +139,11 @@ func (r *photoRepository) UpdateFields(id uint, fields map[string]interface{}) e
 // 设计意图：排除照片使用 status=excluded（可恢复），Delete 用于真正的数据清理
 func (r *photoRepository) Delete(id uint) error {
 	return r.db.Unscoped().Delete(&model.Photo{}, "id = ?", id).Error
+}
+
+// DeleteTx 在已有事务内硬删除照片，用于与标签清理同事务原子提交
+func (r *photoRepository) DeleteTx(tx *gorm.DB, id uint) error {
+	return tx.Unscoped().Delete(&model.Photo{}, "id = ?", id).Error
 }
 
 // GetByID 根据 ID 获取照片
@@ -874,13 +881,13 @@ func (r *photoRepository) GetCategories() ([]string, error) {
 	return categories, err
 }
 
-// GetTags 获取热门标签（从 photo_tags 表查询，支持搜索和限制数量）
+// GetTags 获取热门标签（从 photo_tag_stats 预聚合表查询，支持搜索和限制数量）。
+// 统计表由 photo_tags 写入路径增量维护，避免对明细表实时 GROUP BY 全表扫描。
 func (r *photoRepository) GetTags(query string, limit int) ([]model.TagWithCount, error) {
 	var results []model.TagWithCount
-	db := r.db.Table("photo_tags").
-		Select("tag, COUNT(*) as count").
-		Group("tag").
-		Order("count DESC, tag ASC")
+	db := r.db.Table("photo_tag_stats").
+		Select("tag, photo_count as count").
+		Order("photo_count DESC, tag ASC")
 
 	if query != "" {
 		db = db.Where("tag LIKE ?", "%"+query+"%")
@@ -893,12 +900,10 @@ func (r *photoRepository) GetTags(query string, limit int) ([]model.TagWithCount
 	return results, err
 }
 
-// CountTags 统计不同标签总数
+// CountTags 统计不同标签总数（直接取统计表行数）
 func (r *photoRepository) CountTags() (int64, error) {
 	var count int64
-	err := r.db.Table("photo_tags").
-		Distinct("tag").
-		Count(&count).Error
+	err := r.db.Table("photo_tag_stats").Count(&count).Error
 	return count, err
 }
 

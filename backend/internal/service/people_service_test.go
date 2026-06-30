@@ -1352,7 +1352,7 @@ func TestPhotoScanStartsPeopleBackground(t *testing.T) {
 	cfg.People.MLEndpoint = "http://ml-service"
 	cfg.People.Timeout = 5
 
-	photoSvc := NewPhotoService(photoRepo, repository.NewPhotoTagRepository(db), scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	photoSvc := NewPhotoService(photoRepo, repository.NewPhotoTagRepository(db), db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
 	peopleSvc := NewPeopleService(
 		db,
 		photoRepo,

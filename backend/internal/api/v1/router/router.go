@@ -223,6 +223,7 @@ func Setup(db *gorm.DB, cfg *config.Config, appState *lifecycle.State) (*gin.Eng
 				photos.GET("/stats", handlers.Photo.GetPhotoStats)
 				photos.GET("/categories", handlers.Photo.GetCategories)
 				photos.GET("/tags", handlers.Photo.GetTags)
+				photos.POST("/tags/rebuild", handlers.Photo.RebuildTagStats)
 				photos.GET("", handlers.Photo.GetPhotos)
 				photos.GET("/:id", handlers.Photo.GetPhotoByID)
 				photos.GET("/:id/adjacent", handlers.Photo.GetAdjacentPhotos)

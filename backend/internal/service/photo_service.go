@@ -16,6 +16,7 @@ import (
 	"github.com/davidhoo/relive/pkg/config"
 	"github.com/davidhoo/relive/pkg/database"
 	"github.com/davidhoo/relive/pkg/logger"
+	"gorm.io/gorm"
 )
 
 // PhotoService 照片服务接口
@@ -45,6 +46,7 @@ type PhotoService interface {
 	// 分类和标签
 	GetCategories() ([]string, error)
 	GetTags(query string, limit int) ([]model.TagWithCount, int64, error)
+	RebuildTagStats() error
 
 	// 地理编码
 	GeocodePhotoIfNeeded(photo *model.Photo) error
@@ -85,6 +87,7 @@ type PhotoService interface {
 type photoService struct {
 	repo                   repository.PhotoRepository
 	photoTagRepo           repository.PhotoTagRepository
+	db                     *gorm.DB
 	scanJobRepo            repository.ScanJobRepository
 	config                 *config.Config
 	configService          ConfigService
@@ -125,13 +128,14 @@ func (s *photoService) SetPeopleService(peopleService PeopleService) {
 }
 
 // NewPhotoService 创建照片服务
-func NewPhotoService(repo repository.PhotoRepository, photoTagRepo repository.PhotoTagRepository, scanJobRepo repository.ScanJobRepository, cfg *config.Config, configService ConfigService, geocodeService GeocodeService, thumbnailService ThumbnailService, geocodeTaskService GeocodeTaskService) PhotoService {
+func NewPhotoService(repo repository.PhotoRepository, photoTagRepo repository.PhotoTagRepository, db *gorm.DB, scanJobRepo repository.ScanJobRepository, cfg *config.Config, configService ConfigService, geocodeService GeocodeService, thumbnailService ThumbnailService, geocodeTaskService GeocodeTaskService) PhotoService {
 	// 初始化缩略图生成器（1024px，兼顾展示和 AI 理解）
 	thumbnailGenerator := util.NewThumbnailGenerator(1024, 1024, 90, cfg.Photos.ThumbnailPath)
 
 	service := &photoService{
 		repo:                 repo,
 		photoTagRepo:         photoTagRepo,
+		db:                   db,
 		scanJobRepo:          scanJobRepo,
 		config:               cfg,
 		configService:        configService,
@@ -336,7 +340,7 @@ func (s *photoService) DeletePhotosByPathPrefix(pathPrefix string) (int64, error
 	count := int64(0)
 	for _, photo := range photos {
 		if err := s.executeWrite(func() error {
-			return s.repo.Delete(photo.ID)
+			return s.deletePhotoAndTags(photo.ID)
 		}); err != nil {
 			logger.Warnf("Failed to delete photo %d: %v", photo.ID, err)
 			continue
@@ -346,6 +350,35 @@ func (s *photoService) DeletePhotosByPathPrefix(pathPrefix string) (int64, error
 
 	logger.Infof("Deleted %d photos with path prefix: %s", count, pathPrefix)
 	return count, nil
+}
+
+// deletePhotoAndTags 删除照片及其标签与统计，尽量在同一事务内完成以保证一致性。
+// 当 db 不可用时退化为顺序删除（标签优先，避免统计漂移）。
+func (s *photoService) deletePhotoAndTags(photoID uint) error {
+	if s.db != nil {
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if s.photoTagRepo != nil {
+				if err := s.photoTagRepo.DeleteTagsByPhotoIDTx(tx, photoID); err != nil {
+					return err
+				}
+			}
+			return s.repo.DeleteTx(tx, photoID)
+		})
+	}
+	if s.photoTagRepo != nil {
+		if err := s.photoTagRepo.DeleteTagsByPhotoID(photoID); err != nil {
+			return err
+		}
+	}
+	return s.repo.Delete(photoID)
+}
+
+// RebuildTagStats 全量重建标签统计表，用于修复历史数据或异常漂移。可重复执行。
+func (s *photoService) RebuildTagStats() error {
+	if s.db == nil {
+		return fmt.Errorf("database not available")
+	}
+	return database.RebuildPhotoTagStats(s.db)
 }
 
 // GetPhotoIDsByPathPrefix 根据路径前缀获取照片ID列表

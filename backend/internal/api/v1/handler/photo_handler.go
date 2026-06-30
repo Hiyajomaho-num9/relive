@@ -1104,6 +1104,32 @@ func (h *PhotoHandler) GetTags(c *gin.Context) {
 	})
 }
 
+// RebuildTagStats 全量重建标签统计表
+// @Summary 重建标签统计
+// @Description 从 photo_tags 全量重建 photo_tag_stats 预聚合统计表，用于修复历史数据或异常漂移
+// @Tags photos
+// @Produce json
+// @Success 200 {object} model.Response
+// @Failure 500 {object} model.Response
+// @Router /api/v1/photos/tags/rebuild [post]
+func (h *PhotoHandler) RebuildTagStats(c *gin.Context) {
+	if err := h.photoService.RebuildTagStats(); err != nil {
+		logger.Errorf("Rebuild tag stats failed: %v", err)
+		c.JSON(http.StatusInternalServerError, model.Response{
+			Success: false,
+			Error: &model.ErrorInfo{
+				Code:    "REBUILD_FAILED",
+				Message: "Failed to rebuild tag stats",
+			},
+		})
+		return
+	}
+	c.JSON(http.StatusOK, model.Response{
+		Success: true,
+		Message: "Tag stats rebuilt",
+	})
+}
+
 // CountPhotosByPaths 按路径统计照片数量
 // @Summary 按路径统计照片数量
 // @Description 统计多个扫描路径下的照片数量
