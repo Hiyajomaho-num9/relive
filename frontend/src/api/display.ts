@@ -46,8 +46,18 @@ export interface DailyDisplayBatch {
   items: DailyDisplayItem[]
 }
 
+// 历史批次摘要，仅含批次级元数据，不含 items/照片/资源。
+export interface DailyDisplayBatchSummary {
+  id: number
+  batch_date: string
+  status: string
+  item_count: number
+  generated_at?: string
+  updated_at: string
+}
+
 export interface DailyDisplayBatchListResponse {
-  items: DailyDisplayBatch[]
+  items: DailyDisplayBatchSummary[]
 }
 
 export interface GenerateDailyBatchRequest {
@@ -65,9 +75,17 @@ export const dailyDisplayApi = {
     }
   },
 
-  listHistory: async (limit = 15): Promise<DailyDisplayBatch[]> => {
+  listHistory: async (limit = 15): Promise<DailyDisplayBatchSummary[]> => {
     const response = await http.get<ApiResponse<DailyDisplayBatchListResponse>>('/display/history', { params: { limit } })
     return response.data?.data?.items || []
+  },
+
+  getBatchDetail: async (id: number): Promise<DailyDisplayBatch> => {
+    const response = await http.get<ApiResponse<DailyDisplayBatch>>(`/display/history/${id}`)
+    if (!response.data?.data) {
+      throw new Error('加载批次详情失败')
+    }
+    return response.data.data
   },
 
   generateBatch: async (payload: GenerateDailyBatchRequest): Promise<DailyDisplayBatch> => {

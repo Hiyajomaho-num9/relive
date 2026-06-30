@@ -200,6 +200,7 @@ func Setup(db *gorm.DB, cfg *config.Config, appState *lifecycle.State) (*gin.Eng
 			authorized.POST("/display/preview", handlers.Display.PreviewPhotos)
 			authorized.GET("/display/batch", handlers.Display.GetDailyBatch)
 			authorized.GET("/display/history", handlers.Display.ListDailyBatches)
+			authorized.GET("/display/history/:id", handlers.Display.GetDailyBatchByID)
 			authorized.POST("/display/batch/generate", handlers.Display.GenerateDailyBatch)
 			authorized.POST("/display/batch/generate/async", handlers.Display.GenerateDailyBatchAsync)
 			authorized.GET("/display/render-profiles", handlers.Display.GetRenderProfiles)

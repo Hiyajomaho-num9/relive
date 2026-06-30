@@ -355,28 +355,35 @@
       <el-skeleton v-if="historyLoading" :rows="4" animated />
       <el-empty v-else-if="batchHistory.length === 0" description="暂无历史批次" />
       <div v-else class="history-list">
-        <el-collapse>
-          <el-collapse-item v-for="batch in batchHistory" :key="batch.id" :name="batch.batch_date">
+        <el-collapse v-model="activeHistoryNames" @change="onHistoryCollapseChange">
+          <el-collapse-item v-for="batch in batchHistory" :key="batch.id" :name="String(batch.id)">
             <template #title>
               <div class="history-title">
                 <span>{{ batch.batch_date }}</span>
                 <span class="history-title-meta">{{ batch.item_count }} 张 · {{ batch.status }}</span>
               </div>
             </template>
-            <div class="batch-grid compact">
-              <div v-for="item in batch.items" :key="item.id" class="batch-item compact">
-                <button type="button" class="batch-preview-trigger" @click="openDitherPreview(item)"><img class="batch-preview" :src="resolveProtectedUrl(item.preview_url)" :alt="item.photo?.caption || getFileName(item.photo?.file_path || '')"></button>
-                <div class="batch-item-meta">
-                  <div class="batch-item-title">
-                    #{{ item.sequence }} {{ item.photo?.caption || getFileName(item.photo?.file_path || '') }}
-                    <el-tag v-if="item.curation_channel" size="small" :type="curationChannelType(item.curation_channel)" effect="plain" class="curation-tag">{{ curationChannelLabel(item.curation_channel) }}</el-tag>
-                  </div>
-                  <div class="batch-asset-links">
-                    <a v-for="asset in item.assets" :key="asset.id" :href="resolveProtectedUrl(asset.bin_url || '')" target="_blank" rel="noreferrer">{{ asset.render_profile }}</a>
+            <template v-if="isBatchExpanded(batch.id)">
+              <el-skeleton v-if="batchDetailLoading[batch.id]" :rows="3" animated />
+              <div v-else-if="batchDetailError[batch.id]" class="batch-detail-error">
+                <span>{{ batchDetailError[batch.id] }}</span>
+                <el-button size="small" @click="reloadBatchDetail(batch.id)">重试</el-button>
+              </div>
+              <div v-else-if="batchDetailCache[batch.id]" class="batch-grid compact">
+                <div v-for="item in batchDetailCache[batch.id]?.items ?? []" :key="item.id" class="batch-item compact">
+                  <button type="button" class="batch-preview-trigger" @click="openDitherPreview(item)"><img class="batch-preview" loading="lazy" :src="resolveProtectedUrl(item.preview_url)" :alt="item.photo?.caption || getFileName(item.photo?.file_path || '')"></button>
+                  <div class="batch-item-meta">
+                    <div class="batch-item-title">
+                      #{{ item.sequence }} {{ item.photo?.caption || getFileName(item.photo?.file_path || '') }}
+                      <el-tag v-if="item.curation_channel" size="small" :type="curationChannelType(item.curation_channel)" effect="plain" class="curation-tag">{{ curationChannelLabel(item.curation_channel) }}</el-tag>
+                    </div>
+                    <div class="batch-asset-links">
+                      <a v-for="asset in item.assets" :key="asset.id" :href="resolveProtectedUrl(asset.bin_url || '')" target="_blank" rel="noreferrer">{{ asset.render_profile }}</a>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            </template>
           </el-collapse-item>
         </el-collapse>
       </div>
@@ -491,7 +498,7 @@ import type { ApiResponse } from '@/types/api'
 import { Calendar, Clock, Files, Picture, View } from '@element-plus/icons-vue'
 import { displayStrategyApi, defaultDisplayStrategyConfig } from '@/api/config'
 import type { DisplayPreviewResponse, DisplayStrategyConfig } from '@/api/config'
-import { dailyDisplayApi, type DailyDisplayBatch, type RenderProfileOption } from '@/api/display'
+import { dailyDisplayApi, type DailyDisplayBatch, type DailyDisplayBatchSummary, type RenderProfileOption } from '@/api/display'
 import type { Photo } from '@/types/photo'
 
 
@@ -507,7 +514,11 @@ const loading = ref(false)
 const previewLoading = ref(false)
 const previewResult = ref<DisplayPreviewResponse | null>(null)
 const dailyBatch = ref<DailyDisplayBatch | null>(null)
-const batchHistory = ref<DailyDisplayBatch[]>([])
+const batchHistory = ref<DailyDisplayBatchSummary[]>([])
+const batchDetailCache = ref<Record<number, DailyDisplayBatch>>({})
+const batchDetailLoading = ref<Record<number, boolean>>({})
+const batchDetailError = ref<Record<number, string>>({})
+const activeHistoryNames = ref<string[]>([])
 const batchLoading = ref(false)
 const historyLoading = ref(false)
 const batchGenerating = ref(false)
@@ -746,10 +757,48 @@ const loadBatchHistory = async () => {
   historyLoading.value = true
   try {
     batchHistory.value = await dailyDisplayApi.listHistory(10)
+    // 刷新历史：清除详情缓存、加载状态与展开态，重新获取最新详情
+    batchDetailCache.value = {}
+    batchDetailLoading.value = {}
+    batchDetailError.value = {}
+    activeHistoryNames.value = []
   } catch (error: any) {
     ElMessage.error(error.message || '加载历史批次失败')
   } finally {
     historyLoading.value = false
+  }
+}
+
+const isBatchExpanded = (id: number) => activeHistoryNames.value.includes(String(id))
+
+// 展开历史批次时按需加载该批次完整内容；已缓存则不重复请求。
+const loadBatchDetail = async (id: number) => {
+  if (batchDetailCache.value[id] || batchDetailLoading.value[id]) return
+  batchDetailLoading.value = { ...batchDetailLoading.value, [id]: true }
+  batchDetailError.value = { ...batchDetailError.value, [id]: '' }
+  try {
+    const detail = await dailyDisplayApi.getBatchDetail(id)
+    batchDetailCache.value = { ...batchDetailCache.value, [id]: detail }
+  } catch (error: any) {
+    batchDetailError.value = { ...batchDetailError.value, [id]: error.message || '加载批次详情失败' }
+  } finally {
+    batchDetailLoading.value = { ...batchDetailLoading.value, [id]: false }
+  }
+}
+
+// 失败重试：清除错误与缓存后重新加载。
+const reloadBatchDetail = (id: number) => {
+  delete batchDetailCache.value[id]
+  loadBatchDetail(id)
+}
+
+const onHistoryCollapseChange = (names: string[]) => {
+  activeHistoryNames.value = names
+  for (const name of names) {
+    const id = Number(name)
+    if (!Number.isNaN(id)) {
+      loadBatchDetail(id)
+    }
   }
 }
 
@@ -1350,6 +1399,15 @@ onUnmounted(() => {
 .history-title-meta {
   font-size: 12px;
   color: #909399;
+}
+
+.batch-detail-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  color: #f56c6c;
+  font-size: 13px;
 }
 
 :deep(.preview-dialog .el-dialog) {

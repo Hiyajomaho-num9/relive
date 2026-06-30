@@ -44,6 +44,21 @@ type DailyDisplayBatchListResponse struct {
 	Items []*DailyDisplayBatchResponse `json:"items"`
 }
 
+// DailyDisplayBatchSummary 历史批次摘要，仅包含批次级元数据，
+// 不预加载 Items/Photo/Assets，供历史列表轻量加载使用。
+type DailyDisplayBatchSummary struct {
+	ID          uint       `json:"id"`
+	BatchDate   string     `json:"batch_date"`
+	Status      string     `json:"status"`
+	ItemCount   int        `json:"item_count"`
+	GeneratedAt *time.Time `json:"generated_at,omitempty"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type DailyDisplayBatchSummaryListResponse struct {
+	Items []*DailyDisplayBatchSummary `json:"items"`
+}
+
 type DeviceDisplayResponse struct {
 	BatchDate     string `json:"batch_date"`
 	Sequence      int    `json:"sequence"`

@@ -213,12 +213,33 @@ func (h *DisplayHandler) ListDailyBatches(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, model.Response{Success: false, Error: &model.ErrorInfo{Code: "QUERY_FAILED", Message: err.Error()}})
 		return
 	}
-	items := make([]*model.DailyDisplayBatchResponse, 0, len(batches))
+	items := make([]*model.DailyDisplayBatchSummary, 0, len(batches))
 	for _, batch := range batches {
-		resp := h.toDailyBatchResponse(batch)
-		items = append(items, &resp)
+		items = append(items, &model.DailyDisplayBatchSummary{
+			ID:          batch.ID,
+			BatchDate:   batch.BatchDate,
+			Status:      batch.Status,
+			ItemCount:   batch.ItemCount,
+			GeneratedAt: batch.GeneratedAt,
+			UpdatedAt:   batch.UpdatedAt,
+		})
 	}
-	c.JSON(http.StatusOK, model.Response{Success: true, Message: "Success", Data: model.DailyDisplayBatchListResponse{Items: items}})
+	c.JSON(http.StatusOK, model.Response{Success: true, Message: "Success", Data: model.DailyDisplayBatchSummaryListResponse{Items: items}})
+}
+
+// GetDailyBatchByID 展开历史批次时按需加载单个批次的完整内容（含照片与资源）。
+func (h *DisplayHandler) GetDailyBatchByID(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Response{Success: false, Error: &model.ErrorInfo{Code: "INVALID_REQUEST", Message: "Invalid batch ID"}})
+		return
+	}
+	batch, err := h.displayService.GetDailyBatchByID(uint(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, model.Response{Success: false, Error: &model.ErrorInfo{Code: "NOT_FOUND", Message: "Daily batch not found"}})
+		return
+	}
+	c.JSON(http.StatusOK, model.Response{Success: true, Message: "Success", Data: h.toDailyBatchResponse(batch)})
 }
 
 func (h *DisplayHandler) GetRenderProfiles(c *gin.Context) {

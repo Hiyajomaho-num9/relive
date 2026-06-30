@@ -209,6 +209,64 @@ func TestDisplayService_GenerateDailyBatchAvoidsRecentlyDisplayedPhotos(t *testi
 	}
 }
 
+// TestDisplayService_ListDailyBatchesReturnsSummaries 验证历史列表为轻量化加载：
+// 不预加载 Items/Photo/Assets，仅返回批次级摘要字段。
+func TestDisplayService_ListDailyBatchesReturnsSummaries(t *testing.T) {
+	db := setupDisplayServiceTestDB(t)
+	defer closeDisplayServiceTestDB(db)
+
+	tempDir := t.TempDir()
+	displayService, photoRepo, _, configService := buildTestDisplayService(t, db, tempDir)
+	targetDate := time.Now()
+	createBatchPhotos(t, photoRepo, tempDir, targetDate, 3)
+	setDisplayStrategy(t, configService, model.DisplayStrategyConfig{Algorithm: "random", MinBeautyScore: 60, MinMemoryScore: 60, DailyCount: 3})
+
+	generated, err := displayService.GenerateDailyBatch(targetDate, true)
+	require.NoError(t, err)
+	require.Len(t, generated.Items, 3)
+
+	batches, err := displayService.ListDailyBatches(10)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+
+	summary := batches[0]
+	assert.Equal(t, generated.ID, summary.ID)
+	assert.Equal(t, generated.ItemCount, summary.ItemCount)
+	assert.Equal(t, generated.Status, summary.Status)
+	assert.Equal(t, generated.BatchDate, summary.BatchDate)
+	// 摘要不得预加载 Items/Photo/Assets
+	assert.Empty(t, summary.Items, "history list must not preload items")
+}
+
+// TestDisplayService_GetDailyBatchByIDLoadsDetail 验证按 ID 加载批次详情时
+// 完整预加载 Items/Photo/Assets，供展开后查看。
+func TestDisplayService_GetDailyBatchByIDLoadsDetail(t *testing.T) {
+	db := setupDisplayServiceTestDB(t)
+	defer closeDisplayServiceTestDB(db)
+
+	tempDir := t.TempDir()
+	displayService, photoRepo, _, configService := buildTestDisplayService(t, db, tempDir)
+	targetDate := time.Now()
+	createBatchPhotos(t, photoRepo, tempDir, targetDate, 3)
+	setDisplayStrategy(t, configService, model.DisplayStrategyConfig{Algorithm: "random", MinBeautyScore: 60, MinMemoryScore: 60, DailyCount: 3})
+
+	generated, err := displayService.GenerateDailyBatch(targetDate, true)
+	require.NoError(t, err)
+
+	detail, err := displayService.GetDailyBatchByID(generated.ID)
+	require.NoError(t, err)
+	require.Equal(t, generated.ID, detail.ID)
+	require.Len(t, detail.Items, generated.ItemCount)
+	for _, item := range detail.Items {
+		assert.NotZero(t, item.Photo.ID, "detail must preload Items.Photo")
+		assert.NotEmpty(t, item.Assets, "detail must preload Items.Assets")
+	}
+
+	// 不存在的批次返回错误
+	_, err = displayService.GetDailyBatchByID(999999)
+	assert.Error(t, err)
+}
+
 func TestCurationPeopleSpotlightUsesRealPeopleData(t *testing.T) {
 	db := setupDisplayServiceTestDB(t)
 	defer closeDisplayServiceTestDB(db)
