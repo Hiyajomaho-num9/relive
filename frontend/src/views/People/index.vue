@@ -11,32 +11,25 @@
     <el-tabs v-model="activeTab" class="people-tabs">
       <el-tab-pane label="人物列表" name="people">
         <div class="section-stack">
-          <el-card shadow="never" class="section-card animate-fade-in">
-            <template #header>
-              <SectionHeader :icon="Search" title="筛选条件" />
-            </template>
-
-            <div class="filters-row">
-              <el-input
-                v-model="filters.search"
-                clearable
-                placeholder="搜索人物姓名 / ID / 类别"
-                class="filter-input"
-                @keyup.enter="handleSearch"
-                @clear="handleSearch"
-              />
-              <el-select v-model="filters.category" clearable placeholder="全部类别" class="filter-select">
-                <el-option v-for="option in categoryOptions" :key="option.value" :label="option.label" :value="option.value" />
-              </el-select>
-              <el-button type="primary" @click="handleSearch">应用筛选</el-button>
-            </div>
-          </el-card>
-
-          <el-card shadow="never" class="section-card animate-fade-in animate-delay-1">
+          <el-card shadow="never" class="section-card people-list-card animate-fade-in">
             <template #header>
               <SectionHeader :icon="User" :title="`人物列表（共 ${total} 人）`">
                 <template #actions>
-                  <el-button size="small" plain class="mini-action-btn" @click="loadPeople">刷新</el-button>
+                  <div class="people-header-filters">
+                    <el-input
+                      v-model="filters.search"
+                      clearable
+                      placeholder="搜索人物姓名 / ID / 类别"
+                      class="header-filter-input"
+                      @keyup.enter="handleSearch"
+                      @clear="handleSearch"
+                    />
+                    <el-select v-model="filters.category" clearable placeholder="全部类别" class="header-filter-select">
+                      <el-option v-for="option in categoryOptions" :key="option.value" :label="option.label" :value="option.value" />
+                    </el-select>
+                    <el-button size="small" type="primary" @click="handleSearch">应用筛选</el-button>
+                    <el-button size="small" plain class="mini-action-btn" @click="loadPeople">刷新</el-button>
+                  </div>
                 </template>
               </SectionHeader>
             </template>
@@ -86,7 +79,7 @@
             </div>
           </el-card>
 
-          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card animate-fade-in animate-delay-2">
+          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card animate-fade-in animate-delay-1">
             <template #header>
               <SectionHeader :icon="Connection" :title="`人物合并建议（${mergeSuggestionTotal}）`">
                 <template #actions>
@@ -347,7 +340,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Clock, Connection, Document, Search, User } from '@element-plus/icons-vue'
+import { Clock, Connection, Document, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import PageHeader from '@/components/PageHeader.vue'
@@ -426,6 +419,8 @@ const enqueueing = ref(false)
 const logContainerRef = ref<HTMLElement | null>(null)
 const mergeLogContainerRef = ref<HTMLElement | null>(null)
 let taskTimer: number | null = null
+// 后台任务数据按需懒加载保护：避免轮询、Tab 切换、操作回调并发触发重复请求
+const taskDataLoading = ref(false)
 
 const workerActive = computed(() => {
   const s = task.value?.status
@@ -575,6 +570,9 @@ const loadMergeSuggestionTaskData = async () => {
 }
 
 const loadTaskData = async () => {
+  // 请求进行中保护：快速切换 Tab 或轮询叠加时跳过，避免重叠/成倍并发请求
+  if (taskDataLoading.value) return
+  taskDataLoading.value = true
   try {
     const [taskRes, statsRes, logsRes] = await Promise.all([
       peopleApi.getTask(),
@@ -587,6 +585,8 @@ const loadTaskData = async () => {
     await loadMergeSuggestionTaskData()
   } catch (error: any) {
     ElMessage.error(error.message || '加载人物任务状态失败')
+  } finally {
+    taskDataLoading.value = false
   }
 }
 
@@ -713,7 +713,13 @@ const openMergeSuggestionReview = async (id: number) => {
 }
 
 const reloadMergeSuggestionReviewState = async (shouldCloseOnComplete = false) => {
-  await Promise.all([loadMergeSuggestions(), loadTaskData()])
+  // 合并建议审核弹窗仅在人物列表 Tab 打开；未进入后台任务 Tab 时不触发后台任务请求，
+  // 待用户切回后台任务 Tab 时由 watch 重新加载
+  const tasks: Promise<unknown>[] = [loadMergeSuggestions()]
+  if (activeTab.value === 'task') {
+    tasks.push(loadTaskData())
+  }
+  await Promise.all(tasks)
   if (!currentMergeSuggestionId.value) {
     return
   }
@@ -826,8 +832,10 @@ watch(activeTab, async (tab) => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadPeople(), loadTaskData(), loadMergeSuggestions()])
+  // 首次仅加载人物列表与合并建议；后台任务数据改为进入“后台任务” Tab 后按需懒加载
+  await Promise.all([loadPeople(), loadMergeSuggestions()])
   taskTimer = window.setInterval(() => {
+    // 仅在后台任务 Tab 时轮询后台任务数据；切回人物列表后不再产生后台任务请求
     if (activeTab.value === 'task') {
       void loadTaskData()
     }
@@ -867,19 +875,28 @@ onBeforeUnmount(() => {
   padding: 24px 28px;
 }
 
-.filters-row {
-  display: flex;
-  gap: 12px;
-  align-items: center;
+.people-list-card :deep(.section-header) {
   flex-wrap: wrap;
 }
 
-.filter-input {
-  width: min(360px, 100%);
+.people-list-card :deep(.section-header-actions) {
+  margin-left: auto;
 }
 
-.filter-select {
-  width: 160px;
+.people-header-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.header-filter-input {
+  width: 220px;
+}
+
+.header-filter-select {
+  width: 130px;
 }
 
 .people-grid-wrap {
@@ -1187,6 +1204,15 @@ onBeforeUnmount(() => {
   .merge-suggestion-grid,
   .merge-task-stats {
     grid-template-columns: 1fr;
+  }
+
+  .header-filter-input {
+    width: 100%;
+  }
+
+  .header-filter-select {
+    flex: 1 1 120px;
+    width: auto;
   }
 }
 </style>
