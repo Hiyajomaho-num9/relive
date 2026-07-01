@@ -10,24 +10,18 @@
       />
     </div>
 
-    <!-- 操作菜单：隐藏 / 恢复显示 -->
-    <el-dropdown
-      class="person-card-menu"
-      trigger="click"
-      placement="bottom-end"
-      @command="onMenuCommand"
-      @click.stop
-    >
-      <button type="button" class="person-card-menu-btn" aria-label="人物操作菜单" @click.stop>
-        <el-icon><MoreFilled /></el-icon>
+    <!-- 可见性切换：眼睛图标，点击隐藏 / 恢复显示 -->
+    <el-tooltip :content="person.hidden ? '恢复显示' : '隐藏人物'" placement="bottom" :show-after="300">
+      <button
+        type="button"
+        class="person-card-menu-btn"
+        :aria-label="person.hidden ? '恢复显示' : '隐藏人物'"
+        @click.stop="emit('visibility', person.id, !person.hidden)"
+      >
+        <el-icon v-if="!person.hidden"><View /></el-icon>
+        <el-icon v-else><Hide /></el-icon>
       </button>
-      <template #dropdown>
-        <el-dropdown-menu>
-          <el-dropdown-item v-if="!person.hidden" command="hide">隐藏人物</el-dropdown-item>
-          <el-dropdown-item v-else command="restore">恢复显示</el-dropdown-item>
-        </el-dropdown-menu>
-      </template>
-    </el-dropdown>
+    </el-tooltip>
 
     <!-- 头像：点击进入人物详情页 -->
     <button
@@ -74,7 +68,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { MoreFilled } from '@element-plus/icons-vue'
+import { Hide, View } from '@element-plus/icons-vue'
 import type { Person } from '@/types/people'
 import { getPersonAvatarFallback, getPersonCategoryLabel } from './peopleHelpers'
 
@@ -112,14 +106,6 @@ const avatarAriaLabel = computed(() =>
 const nameAriaLabel = computed(() =>
   hasName.value ? `编辑「${displayName.value}」的人物信息` : '设置人物姓名',
 )
-
-const onMenuCommand = (command: string) => {
-  if (command === 'hide') {
-    emit('visibility', props.person.id, true)
-  } else if (command === 'restore') {
-    emit('visibility', props.person.id, false)
-  }
-}
 </script>
 
 <style scoped>
@@ -158,14 +144,11 @@ const onMenuCommand = (command: string) => {
   padding: 2px;
 }
 
-.person-card-menu {
+.person-card-menu-btn {
   position: absolute;
   top: 4px;
   right: 4px;
   z-index: 2;
-}
-
-.person-card-menu-btn {
   width: 26px;
   height: 26px;
   border: none;
@@ -183,7 +166,7 @@ const onMenuCommand = (command: string) => {
 
 .person-card-menu-btn:hover {
   background: var(--color-bg-soft);
-  color: var(--color-text-primary);
+  color: var(--color-primary, #d46b08);
 }
 
 /* 头像按钮：1:1 圆角方形，懒加载，失败显示兜底 */
