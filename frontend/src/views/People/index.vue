@@ -11,24 +11,23 @@
     <el-tabs v-model="activeTab" class="people-tabs">
       <el-tab-pane label="人物列表" name="people">
         <div class="section-stack">
-          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card merge-suggestion-card-wrap animate-fade-in">
+          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card merge-suggestion-card-wrap animate-fade-in" :class="{ 'is-collapsed': mergeSuggestionCollapsed }">
             <template #header>
               <SectionHeader :icon="Connection" :title="`人物合并建议（待审核 ${mergeSuggestionTotal}）`">
                 <template #actions>
-                  <el-button size="small" plain class="mini-action-btn" @click="loadMergeSuggestions">刷新</el-button>
-                  <el-button size="small" text class="mini-action-btn" @click="mergeSuggestionCollapsed = !mergeSuggestionCollapsed">
-                    {{ mergeSuggestionCollapsed ? '展开' : '收起' }}
+                  <el-button size="small" plain class="mini-action-btn" v-show="!mergeSuggestionCollapsed" @click="loadMergeSuggestions">刷新</el-button>
+                  <el-button text size="small" @click="toggleMergeSuggestionCollapsed" class="collapse-btn">
+                    <el-icon :class="{ 'is-collapsed': mergeSuggestionCollapsed }"><ArrowUp /></el-icon>
                   </el-button>
                 </template>
               </SectionHeader>
             </template>
 
-            <el-collapse-transition>
-              <div v-show="!mergeSuggestionCollapsed">
-                <div v-loading="mergeSuggestionLoading" class="merge-suggestion-list">
+            <div v-show="!mergeSuggestionCollapsed">
+              <div v-loading="mergeSuggestionLoading" class="merge-suggestion-list">
                   <div v-if="mergeSuggestions.length > 0" class="merge-suggestion-grid">
-                <div v-for="suggestion in mergeSuggestions" :key="suggestion.id" class="merge-suggestion-card">
-                  <div class="merge-suggestion-header">
+                    <div v-for="suggestion in mergeSuggestions" :key="suggestion.id" class="merge-suggestion-card">
+                      <div class="merge-suggestion-header">
                     <div class="merge-suggestion-target">
                       <el-avatar
                         :size="40"
@@ -72,11 +71,10 @@
                     </el-button>
                   </div>
                 </div>
-              </div>
-              <el-empty v-else description="当前没有待审核的人物合并建议" />
+                  </div>
+                  <el-empty v-else description="当前没有待审核的人物合并建议" />
                 </div>
-              </div>
-            </el-collapse-transition>
+            </div>
           </el-card>
 
           <el-card shadow="never" class="section-card people-list-card animate-fade-in animate-delay-1">
@@ -406,7 +404,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Clock, Connection, Document, User } from '@element-plus/icons-vue'
+import { ArrowUp, Clock, Connection, Document, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import PageHeader from '@/components/PageHeader.vue'
@@ -467,8 +465,13 @@ const backgroundLogs = ref<string[]>([])
 const people = ref<Person[]>([])
 const total = ref(0)
 
-// 合并建议默认收起，突出待审核事项
-const mergeSuggestionCollapsed = ref(true)
+// 合并建议折叠状态：从 localStorage 读取，无记录时默认展开（与扫描路径一致）
+const mergeSuggestionCollapsed = ref(localStorage.getItem('people_mergeSuggestions_collapsed') === 'true')
+
+const toggleMergeSuggestionCollapsed = () => {
+  mergeSuggestionCollapsed.value = !mergeSuggestionCollapsed.value
+  localStorage.setItem('people_mergeSuggestions_collapsed', String(mergeSuggestionCollapsed.value))
+}
 
 // 浏览模式：翻页 / 连续浏览，记忆用户最后选择
 const browseMode = ref<BrowseMode>(loadBrowseMode())
@@ -1179,6 +1182,23 @@ onBeforeUnmount(() => {
 
 .section-card :deep(.el-card__body) {
   padding: 24px 28px;
+}
+
+.merge-suggestion-card-wrap.is-collapsed :deep(.el-card__body) {
+  display: none;
+}
+
+.collapse-btn {
+  padding: 4px !important;
+  margin-left: -4px;
+}
+
+.collapse-btn .el-icon {
+  transition: transform 0.2s ease;
+}
+
+.collapse-btn .el-icon.is-collapsed {
+  transform: rotate(180deg);
 }
 
 .people-list-card :deep(.section-header) {
