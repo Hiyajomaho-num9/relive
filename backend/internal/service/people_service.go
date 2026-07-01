@@ -33,7 +33,6 @@ const (
 	defaultLinkThreshold       = 0.62
 	defaultAttachThreshold     = 0.65
 	peopleMinClusterFaces      = 2
-	peopleFeedbackPollInterval   = 250 * time.Millisecond
 	peopleFeedbackZeroResultWait = 30 * time.Second // cooldown after zero-result recluster
 	peopleStatsCacheTTL        = 30 * time.Second
 
@@ -111,29 +110,28 @@ type peopleService struct {
 	backgroundBusyMu sync.RWMutex
 	backgroundBusy   bool
 
-	// writeGate serializes foreground mutations (merge/split/move) with background
-	// clustering writes. Foreground ops take Lock (exclusive); worker takes RLock (shared).
+	// writeGate serializes foreground mutations (merge/split/move) with the
+	// clustering coordinator worker. Foreground ops take Lock (exclusive); the
+	// coordinator worker takes RLock (shared) around each clustering batch.
 	// This prevents SQLite "database is locked" when both paths write faces/people tables.
 	writeGate   sync.RWMutex
 	writeQueue  *database.WriteQueue // serializes SQLite write operations
 	idleCount   int                  // consecutive idle loops, used for polling backoff
 
-	feedbackMu            sync.Mutex
-	feedbackRunning       bool
-	feedbackPending       bool
-	feedbackShutdown      bool
-	feedbackStopCh        chan struct{}
-	feedbackPollInterval  time.Duration
-	feedbackCooldown      time.Duration
-	feedbackReclusterHook func() model.ReclusterResult
-	mergeSuggestionDirty  func(string) error
+	// clusteringCoordinator is the single entry point for all incremental
+	// clustering. Its worker is the only goroutine permitted to call
+	// runIncrementalClustering and touch protoCache.
+	clusteringCoordinator *peopleClusteringCoordinator
+
+	mergeSuggestionDirty func(string) error
 
 	// Clustering rate limiting to prevent CPU overload
 	clusteringTaskCounter   int
 	clusteringTaskCounterMu sync.Mutex
 
-	// Prototype cache: avoids reloading all 22K person prototypes on every 50-face clustering batch.
-	// Only accessed from the single background clustering goroutine; no locking required.
+	// Prototype cache: avoids reloading all person prototypes on every clustering batch.
+	// Owned exclusively by the clustering coordinator worker (accessed only via
+	// runIncrementalClustering); no locking required.
 	protoCache *clustProtoCache
 
 	// annCandidateFn, when set, pre-filters the O(N) attach scan to ~O(50) ANN candidates.
@@ -175,21 +173,22 @@ func NewPeopleService(db *gorm.DB, photoRepo repository.PhotoRepository, faceRep
 		logger.Errorf("Failed to reset stuck photo face_process_status on startup: %v", err)
 	}
 
-	return &peopleService{
-		db:                   db,
-		photoRepo:            photoRepo,
-		faceRepo:             faceRepo,
-		personRepo:           personRepo,
-		jobRepo:              jobRepo,
-		mergeJobRepo:         mergeJobRepo,
-		cannotLinkRepo:       cannotLinkRepo,
-		config:               cfg,
-		client:               client,
-		runtimeService:       runtimeService,
-		writeQueue:           database.GetWriteQueue(),
-		feedbackStopCh:       make(chan struct{}),
-		feedbackPollInterval: peopleFeedbackPollInterval,
+	svc := &peopleService{
+		db:             db,
+		photoRepo:      photoRepo,
+		faceRepo:       faceRepo,
+		personRepo:     personRepo,
+		jobRepo:        jobRepo,
+		mergeJobRepo:   mergeJobRepo,
+		cannotLinkRepo: cannotLinkRepo,
+		config:         cfg,
+		client:         client,
+		runtimeService: runtimeService,
+		writeQueue:     database.GetWriteQueue(),
 	}
+	svc.clusteringCoordinator = newPeopleClusteringCoordinator(svc)
+	svc.clusteringCoordinator.start()
+	return svc
 }
 
 // executeWrite runs fn through WriteQueue if available, otherwise directly.
@@ -436,7 +435,10 @@ func (s *peopleService) EnqueueUnprocessed() (int, error) {
 }
 
 func (s *peopleService) HandleShutdown() error {
-	s.stopFeedbackRecluster()
+	// Stop the clustering coordinator first: no new clustering requests are
+	// accepted, pending background work is cleared, and the worker goroutine
+	// exits before we proceed to stop the background people task.
+	s.clusteringCoordinator.stop()
 
 	s.taskMutex.RLock()
 	active := s.active
@@ -461,9 +463,11 @@ func (s *peopleService) ResetAllPeople() (int, error) {
 		}
 	}
 
-	// Acquire write gate exclusively to ensure no background reads are in flight.
-	s.writeGate.Lock()
-	s.writeGate.Unlock()
+	// Acquire the write gate exclusively as a foreground mutation so the
+	// clustering coordinator yields and no clustering batch touches the
+	// tables we are about to wipe.
+	s.beginForegroundMutation()
+	defer s.endForegroundMutation()
 
 	var count int
 	err := s.executeWrite(func() error {
@@ -517,16 +521,29 @@ func (s *peopleService) ResetAllPeople() (int, error) {
 	return enqueued, nil
 }
 
-func (s *peopleService) MergePeople(targetPersonID uint, sourcePersonIDs []uint) (*model.ReclusterResult, error) {
-	s.writeGate.Lock()
-	defer s.writeGate.Unlock()
+func (s *peopleService) MergePeople(targetPersonID uint, sourcePersonIDs []uint) (result *model.ReclusterResult, err error) {
+	totalStart := time.Now()
+	lockWait := s.beginForegroundMutationTimed()
+	defer s.endForegroundMutation()
+	bizStart := time.Now()
+	defer func() {
+		bizElapsed := time.Since(bizStart)
+		totalElapsed := time.Since(totalStart)
+		if err != nil {
+			logger.Warnf("merge_people target=%d sources=%d writeGateWaitMs=%d businessMs=%d totalMs=%d err=%v",
+				targetPersonID, len(sourcePersonIDs), lockWait.Milliseconds(), bizElapsed.Milliseconds(), totalElapsed.Milliseconds(), err)
+		} else {
+			logger.Infof("merge_people target=%d sources=%d writeGateWaitMs=%d businessMs=%d totalMs=%d",
+				targetPersonID, len(sourcePersonIDs), lockWait.Milliseconds(), bizElapsed.Milliseconds(), totalElapsed.Milliseconds())
+		}
+	}()
 
 	var affectedPhotoIDs []uint
-	if err := s.executeWrite(func() error {
-		var err error
-		affectedPhotoIDs, err = s.personRepo.MergeInto(targetPersonID, sourcePersonIDs)
-		if err != nil {
-			return err
+	if err = s.executeWrite(func() error {
+		var innerErr error
+		affectedPhotoIDs, innerErr = s.personRepo.MergeInto(targetPersonID, sourcePersonIDs)
+		if innerErr != nil {
+			return innerErr
 		}
 		for _, sourceID := range sourcePersonIDs {
 			_ = s.cannotLinkRepo.DeleteByPersonID(sourceID)
@@ -535,10 +552,10 @@ func (s *peopleService) MergePeople(targetPersonID uint, sourcePersonIDs []uint)
 	}); err != nil {
 		return nil, err
 	}
-	if err := s.syncPersonState(targetPersonID); err != nil {
+	if err = s.syncPersonState(targetPersonID); err != nil {
 		return nil, err
 	}
-	if err := s.executeWrite(func() error {
+	if err = s.executeWrite(func() error {
 		return s.photoRepo.RecomputeTopPersonCategory(affectedPhotoIDs)
 	}); err != nil {
 		return nil, err
@@ -662,8 +679,8 @@ func (s *peopleService) GetMergeJobStatus(jobID uint) (*model.PeopleMergeJob, er
 }
 
 func (s *peopleService) SplitPerson(faceIDs []uint) (*model.Person, *model.ReclusterResult, error) {
-	s.writeGate.Lock()
-	defer s.writeGate.Unlock()
+	s.beginForegroundMutation()
+	defer s.endForegroundMutation()
 
 	faces, err := s.faceRepo.ListByIDs(faceIDs)
 	if err != nil {
@@ -730,8 +747,8 @@ func (s *peopleService) SplitPerson(faceIDs []uint) (*model.Person, *model.Reclu
 }
 
 func (s *peopleService) MoveFaces(faceIDs []uint, targetPersonID uint) (*model.ReclusterResult, error) {
-	s.writeGate.Lock()
-	defer s.writeGate.Unlock()
+	s.beginForegroundMutation()
+	defer s.endForegroundMutation()
 
 	faces, err := s.faceRepo.ListByIDs(faceIDs)
 	if err != nil {
@@ -815,8 +832,8 @@ func (s *peopleService) UpdatePersonAvatar(personID uint, faceID uint) error {
 // DissolvePerson 解散指定人物：将其所有人脸（含人工确认）打回 pending，删除人物记录和约束。
 // 返回被释放的人脸数量。不触发自动重聚类，由后台任务自然处理。
 func (s *peopleService) DissolvePerson(personID uint) (int, error) {
-	s.writeGate.Lock()
-	defer s.writeGate.Unlock()
+	s.beginForegroundMutation()
+	defer s.endForegroundMutation()
 
 	person, err := s.personRepo.GetByID(personID)
 	if err != nil {
@@ -995,7 +1012,9 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 			s.setTaskState(model.TaskStatusRunning, "detecting",
 				fmt.Sprintf("正在处理照片 #%d", job.PhotoID), &job.PhotoID)
 			s.setBackgroundBusy(true)
-			s.writeGate.RLock()
+			// processJob self-manages the write gate: it releases the gate
+			// during ML detection and only holds it for result writes, and
+			// submits clustering to the coordinator without holding the gate.
 			err = func() (retErr error) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -1004,7 +1023,6 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 				}()
 				return s.processJob(job)
 			}()
-			s.writeGate.RUnlock()
 			s.setBackgroundBusy(false)
 			if err != nil {
 				s.appendBackgroundLog(fmt.Sprintf("处理人物任务 %d 失败：%v", job.ID, err))
@@ -1063,7 +1081,9 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 			}
 
 			s.setBackgroundBusy(true)
-			s.writeGate.RLock()
+			// processPendingFaces submits clustering to the coordinator, which
+			// acquires the write gate per batch. We must NOT hold the write
+			// gate here while waiting for the coordinator.
 			hasMore, clusterErr := func() (hm bool, ce error) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -1072,7 +1092,6 @@ func (s *peopleService) runBackground(active *activePeopleTask) {
 				}()
 				return s.processPendingFaces()
 			}()
-			s.writeGate.RUnlock()
 			s.setBackgroundBusy(false)
 			if clusterErr != nil {
 				s.appendBackgroundLog(fmt.Sprintf("处理待聚类人脸失败：%v", clusterErr))
@@ -1143,21 +1162,21 @@ func (s *peopleService) processJob(job *model.PeopleJob) error {
 }
 
 func (s *peopleService) processPendingFaces() (bool, error) {
-	affectedPersonIDs, affectedPhotoIDs, err := s.runIncrementalClustering()
-	if err != nil {
-		return false, err
+	res := s.clusteringCoordinator.submitBackground()
+	if res.err != nil {
+		return false, res.err
 	}
 
-	hasMore := len(affectedPersonIDs) > 0 || len(affectedPhotoIDs) > 0
+	hasMore := len(res.affectedPersonIDs) > 0 || len(res.affectedPhotoIDs) > 0
 
-	for _, personID := range affectedPersonIDs {
+	for _, personID := range res.affectedPersonIDs {
 		if err := s.syncPersonState(personID); err != nil {
 			return false, err
 		}
 	}
-	if len(affectedPhotoIDs) > 0 {
+	if len(res.affectedPhotoIDs) > 0 {
 		if err := s.executeWrite(func() error {
-			return s.photoRepo.RecomputeTopPersonCategory(affectedPhotoIDs)
+			return s.photoRepo.RecomputeTopPersonCategory(res.affectedPhotoIDs)
 		}); err != nil {
 			return false, err
 		}
@@ -1272,6 +1291,7 @@ func (s *peopleService) ApplyDetectionResult(job *model.PeopleJob, photo *model.
 
 	if len(result.Faces) == 0 {
 		s.appendBackgroundLog(fmt.Sprintf("照片 #%d 无人脸", photo.ID))
+		s.writeGate.RLock()
 		if err := s.executeWrite(func() error {
 			return s.db.Transaction(func(tx *gorm.DB) error {
 				if err := tx.Where("photo_id = ?", photo.ID).Delete(&model.Face{}).Error; err != nil {
@@ -1291,8 +1311,10 @@ func (s *peopleService) ApplyDetectionResult(job *model.PeopleJob, photo *model.
 				}).Error
 			})
 		}); err != nil {
+			s.writeGate.RUnlock()
 			return err
 		}
+		s.writeGate.RUnlock()
 		for _, pid := range previousPersonIDs {
 			if err := s.syncPersonState(pid); err != nil {
 				logger.Warnf("sync person %d state after zero-faces detection: %v", pid, err)
@@ -1349,6 +1371,7 @@ func (s *peopleService) ApplyDetectionResult(job *model.PeopleJob, photo *model.
 		createdFaces = append(createdFaces, face)
 	}
 
+	s.writeGate.RLock()
 	if err := s.executeWrite(func() error {
 		return s.db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("photo_id = ?", photo.ID).Delete(&model.Face{}).Error; err != nil {
@@ -1371,8 +1394,10 @@ func (s *peopleService) ApplyDetectionResult(job *model.PeopleJob, photo *model.
 			return nil
 		})
 	}); err != nil {
+		s.writeGate.RUnlock()
 		return err
 	}
+	s.writeGate.RUnlock()
 
 	// Rate limiting: only cluster every N tasks to prevent CPU overload
 	// This is especially important for NAS devices with limited CPU resources
@@ -1387,7 +1412,11 @@ func (s *peopleService) ApplyDetectionResult(job *model.PeopleJob, photo *model.
 	var affectedPersonIDs, affectedPhotoIDs []uint
 	var clusterErr error
 	if shouldCluster {
-		affectedPersonIDs, affectedPhotoIDs, clusterErr = s.runIncrementalClustering()
+		// Submit clustering to the coordinator without holding the write gate.
+		clusterRes := s.clusteringCoordinator.submitBackground()
+		affectedPersonIDs = clusterRes.affectedPersonIDs
+		affectedPhotoIDs = clusterRes.affectedPhotoIDs
+		clusterErr = clusterRes.err
 		if clusterErr != nil {
 			if updateErr := s.jobRepo.UpdateFields(job.ID, map[string]interface{}{
 				"status":       model.PeopleJobStatusFailed,
@@ -1474,192 +1503,48 @@ func (s *peopleService) appendBackgroundLog(message string) {
 	}
 }
 
+// scheduleFeedbackRecluster requests a feedback recluster through the
+// clustering coordinator. Multiple calls coalesce into at most one running
+// feedback task plus one pending makeup run.
 func (s *peopleService) scheduleFeedbackRecluster() {
-	s.feedbackMu.Lock()
-	if s.feedbackShutdown {
-		s.feedbackMu.Unlock()
-		return
-	}
-	s.feedbackPending = true
-	if s.feedbackRunning {
-		s.feedbackMu.Unlock()
-		return
-	}
-	s.feedbackRunning = true
-	s.feedbackMu.Unlock()
-
-	go s.runFeedbackReclusterLoop()
+	s.clusteringCoordinator.scheduleFeedbackRecluster()
 }
 
-func (s *peopleService) runFeedbackReclusterLoop() {
-	for {
-		if s.feedbackStopRequested() {
-			s.markFeedbackLoopStopped()
-			return
-		}
-
-		if s.shouldDelayFeedbackRecluster() {
-			if s.waitFeedbackPollIntervalOrStop() {
-				s.markFeedbackLoopStopped()
-				return
-			}
-			continue
-		}
-
-		s.feedbackMu.Lock()
-		if s.feedbackShutdown {
-			s.feedbackPending = false
-			s.feedbackRunning = false
-			s.feedbackMu.Unlock()
-			return
-		}
-		if !s.feedbackPending {
-			s.feedbackRunning = false
-			s.feedbackMu.Unlock()
-			return
-		}
-		s.feedbackPending = false
-		hook := s.feedbackReclusterHook
-		s.feedbackMu.Unlock()
-
-		startedAt := time.Now()
-		var result model.ReclusterResult
-		if hook != nil {
-			result = hook()
-		} else {
-			result = s.triggerRecluster()
-		}
-		logger.Infof("feedback recluster complete: evaluated=%d reassigned=%d iterations=%d elapsed=%s",
-			result.Evaluated, result.Reassigned, result.Iterations, time.Since(startedAt).Round(time.Millisecond))
-
-		// Cooldown after zero-result recluster to prevent CPU spin
-		if result.Reassigned == 0 {
-			if s.waitFeedbackCooldownOrStop(s.feedbackCooldownValue()) {
-				s.markFeedbackLoopStopped()
-				return
-			}
-		}
-	}
+// beginForegroundMutation registers an in-progress foreground people mutation
+// (merge/split/move/dissolve/reset) so the clustering coordinator yields before
+// starting the next clustering batch, then acquires the write gate exclusively.
+// It must be paired with endForegroundMutation (typically via defer) so the
+// foreground waiter count is restored on every return path, including panics.
+//
+// Order: increment foregroundWaiters → notify coordinator → acquire writeGate.
+func (s *peopleService) beginForegroundMutation() {
+	s.clusteringCoordinator.addForegroundWaiter()
+	s.writeGate.Lock()
 }
 
-func (s *peopleService) stopFeedbackRecluster() {
-	s.feedbackMu.Lock()
-	s.feedbackPending = false
-	s.feedbackShutdown = true
-	stopCh := s.feedbackStopCh
-	s.feedbackStopCh = nil
-	s.feedbackMu.Unlock()
-
-	if stopCh != nil {
-		close(stopCh)
-	}
+// beginForegroundMutationTimed is like beginForegroundMutation but returns the
+// time spent blocked acquiring writeGate.Lock() (the foreground wait), for
+// merge-task observability.
+func (s *peopleService) beginForegroundMutationTimed() time.Duration {
+	s.clusteringCoordinator.addForegroundWaiter()
+	lockStart := time.Now()
+	s.writeGate.Lock()
+	return time.Since(lockStart)
 }
 
-func (s *peopleService) feedbackStopRequested() bool {
-	s.feedbackMu.Lock()
-	stopCh := s.feedbackStopCh
-	s.feedbackMu.Unlock()
-	if stopCh == nil {
-		return true
-	}
-
-	select {
-	case <-stopCh:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *peopleService) waitFeedbackPollIntervalOrStop() bool {
-	interval := s.feedbackReclusterPollIntervalValue()
-
-	s.feedbackMu.Lock()
-	stopCh := s.feedbackStopCh
-	s.feedbackMu.Unlock()
-	if stopCh == nil {
-		return true
-	}
-
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-
-	select {
-	case <-stopCh:
-		return true
-	case <-timer.C:
-		return false
-	}
-}
-
-// waitFeedbackCooldownOrStop waits for the given duration or returns if stop is requested.
-// Returns true if stop was requested (caller should exit), false if the cooldown elapsed.
-func (s *peopleService) waitFeedbackCooldownOrStop(cooldown time.Duration) bool {
-	s.feedbackMu.Lock()
-	stopCh := s.feedbackStopCh
-	s.feedbackMu.Unlock()
-	if stopCh == nil {
-		return true
-	}
-
-	timer := time.NewTimer(cooldown)
-	defer timer.Stop()
-
-	select {
-	case <-stopCh:
-		return true
-	case <-timer.C:
-		return false
-	}
-}
-
-func (s *peopleService) markFeedbackLoopStopped() {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	s.feedbackRunning = false
-	s.feedbackPending = false
-}
-
-func (s *peopleService) shouldDelayFeedbackRecluster() bool {
-	s.backgroundBusyMu.RLock()
-	defer s.backgroundBusyMu.RUnlock()
-	return s.backgroundBusy
-}
-
-func (s *peopleService) feedbackReclusterPollIntervalValue() time.Duration {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	if s.feedbackPollInterval <= 0 {
-		return peopleFeedbackPollInterval
-	}
-	return s.feedbackPollInterval
-}
-
-func (s *peopleService) feedbackCooldownValue() time.Duration {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	if s.feedbackCooldown <= 0 {
-		return peopleFeedbackZeroResultWait
-	}
-	return s.feedbackCooldown
+// endForegroundMutation releases the write gate and deregisters the foreground
+// waiter, waking the coordinator so it can resume clustering.
+func (s *peopleService) endForegroundMutation() {
+	s.writeGate.Unlock()
+	s.clusteringCoordinator.removeForegroundWaiter()
 }
 
 func (s *peopleService) setFeedbackReclusterHookForTest(hook func() model.ReclusterResult) {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	s.feedbackReclusterHook = hook
-}
-
-func (s *peopleService) setFeedbackReclusterPollIntervalForTest(interval time.Duration) {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	s.feedbackPollInterval = interval
+	s.clusteringCoordinator.setFeedbackHook(hook)
 }
 
 func (s *peopleService) setFeedbackCooldownForTest(d time.Duration) {
-	s.feedbackMu.Lock()
-	defer s.feedbackMu.Unlock()
-	s.feedbackCooldown = d
+	s.clusteringCoordinator.setFeedbackCooldown(d)
 }
 
 func (s *peopleService) setMergeSuggestionDirtyHookForTest(hook func(string) error) {
@@ -1699,12 +1584,20 @@ func (s *peopleService) idleInterval() time.Duration {
 	return d
 }
 
-// AcquireWriteGate locks the write gate exclusively and returns a release function.
-// Foreground mutations (merge/split/move) call this to ensure the background
-// clustering worker yields before writing faces/people tables.
+// AcquireWriteGate locks the write gate exclusively as a foreground mutation
+// and returns a release function. Foreground mutations (merge/split/move and
+// suggestion-based merges) call this so the clustering coordinator yields
+// before writing faces/people tables.
 func (s *peopleService) AcquireWriteGate() func() {
+	s.clusteringCoordinator.addForegroundWaiter()
 	s.writeGate.Lock()
-	return s.writeGate.Unlock
+	once := sync.Once{}
+	return func() {
+		once.Do(func() {
+			s.writeGate.Unlock()
+			s.clusteringCoordinator.removeForegroundWaiter()
+		})
+	}
 }
 
 // PostMergeCleanup performs post-merge cleanup for suggestion-based merges.
@@ -2341,6 +2234,12 @@ func (s *peopleService) createPersonFromComponent(component []*model.Face, score
 	return s.personRepo.GetByID(person.ID)
 }
 
+// runIncrementalClustering clusters one batch of pending faces.
+//
+// CALLER CONTRACT: this method is the sole consumer of s.protoCache and may
+// only be invoked from the clustering coordinator worker goroutine (via
+// peopleClusteringCoordinator.runClusterBatch). No other goroutine may call
+// it. This keeps protoCache single-goroutine and avoids concurrent access.
 func (s *peopleService) runIncrementalClustering() ([]uint, []uint, error) {
 	pendingFaces, err := s.faceRepo.ListPending(peopleClusteringBatchSize)
 	if err != nil {
@@ -2351,6 +2250,7 @@ func (s *peopleService) runIncrementalClustering() ([]uint, []uint, error) {
 	}
 
 	if s.protoCache == nil || time.Since(s.protoCache.builtAt) > clustProtoCacheTTL {
+		rebuildStart := time.Now()
 		assignedPersonIDs, err := s.faceRepo.ListAssignedPersonIDs()
 		if err != nil {
 			return nil, nil, err
@@ -2372,12 +2272,15 @@ func (s *peopleService) runIncrementalClustering() ([]uint, []uint, error) {
 			prototypesOrig:    orig,
 			builtAt:           time.Now(),
 		}
+		logger.Infof("people clustering: protoCache rebuilt persons=%d prototypes=%d elapsed=%s",
+			len(orig), len(protoFaces), time.Since(rebuildStart).Round(time.Millisecond))
 	}
 	prototypesWithEmb := s.protoCache.prototypesWithEmb
 	prototypes := s.protoCache.prototypesOrig
 
 	graph := s.buildFaceGraph(pendingFaces)
 	components := s.findConnectedComponents(graph)
+	logger.Infof("people clustering: batch faces=%d components=%d", len(pendingFaces), len(components))
 	pendingByID := make(map[uint]*model.Face, len(pendingFaces))
 	for _, face := range pendingFaces {
 		if face == nil || face.ID == 0 {
@@ -2566,9 +2469,12 @@ func (s *peopleService) triggerRecluster() model.ReclusterResult {
 			break
 		}
 
-		// Re-run incremental clustering with updated prototypes
-		affectedPersonIDs, affectedPhotoIDs, err := s.runIncrementalClustering()
-		if err != nil {
+		// Re-run incremental clustering with updated prototypes. This executes
+		// on the coordinator worker thread; runClusterBatch acquires the write
+		// gate for the batch and yields to foreground waiters between batches.
+		clusterRes := s.clusteringCoordinator.runClusterBatch(clusterSourceFeedback)
+		affectedPersonIDs, affectedPhotoIDs := clusterRes.affectedPersonIDs, clusterRes.affectedPhotoIDs
+		if err := clusterRes.err; err != nil {
 			logger.Warnf("recluster: clustering failed: %v", err)
 			break
 		}
@@ -2611,12 +2517,13 @@ func (s *peopleService) triggerRecluster() model.ReclusterResult {
 	}
 
 	// Cluster any remaining pending faces (e.g., from DissolvePerson).
-	// Skip when recluster did nothing — avoids expensive runIncrementalClustering call
-	// on every zero-result recluster (takes seconds on large databases).
+	// Skip when recluster did nothing — avoids an extra clustering batch on every
+	// zero-result recluster (takes seconds on large databases).
 	var extraPersonIDs, extraPhotoIDs []uint
 	if result.Evaluated > 0 || result.Reassigned > 0 {
+		extraRes := s.clusteringCoordinator.runClusterBatch(clusterSourceFeedback)
 		var clusteringErr error
-		extraPersonIDs, extraPhotoIDs, clusteringErr = s.runIncrementalClustering()
+		extraPersonIDs, extraPhotoIDs, clusteringErr = extraRes.affectedPersonIDs, extraRes.affectedPhotoIDs, extraRes.err
 		if clusteringErr != nil {
 			logger.Warnf("recluster: pending face clustering failed: %v", clusteringErr)
 		} else {

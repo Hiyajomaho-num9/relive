@@ -44,7 +44,10 @@ func (c *fakePeopleMLClient) DetectFaces(ctx context.Context, req mlclient.Detec
 func setupPeopleServiceTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{Logger: gormlogger.Discard})
+	// _busy_timeout matches production (pkg/database): without it, concurrent
+	// writes from the background goroutine, the clustering coordinator worker
+	// and the test goroutine hit "database table is locked" under -race.
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=60000"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -98,6 +101,10 @@ func newPeopleServiceForTest(t *testing.T, client PeopleMLClient) (*peopleServic
 	// Reset clustering task counter to ensure clustering runs on first job
 	// This is needed because tests expect immediate clustering behavior
 	svc.clusteringTaskCounter = peopleClusteringTaskInterval
+
+	t.Cleanup(func() {
+		svc.clusteringCoordinator.stop()
+	})
 
 	return svc, db
 }
@@ -2118,7 +2125,6 @@ func TestPeopleService_MergePeopleSchedulesFeedbackReclusterAsync(t *testing.T) 
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
 
@@ -2172,7 +2178,6 @@ func TestPeopleService_MergePeopleSchedulesFeedbackReclusterAsync(t *testing.T) 
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		select {
 		case started <- struct{}{}:
@@ -2225,7 +2230,6 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2236,7 +2240,6 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	var runs atomic.Int32
 	firstRunStarted := make(chan struct{}, 1)
 	releaseFirstRun := make(chan struct{})
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		run := runs.Add(1)
@@ -2277,12 +2280,11 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	assert.Equal(t, int32(2), runs.Load())
 }
 
-func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.T) {
+func TestPeopleService_FeedbackReclusterNotDeferredByBackgroundBusy(t *testing.T) {
 	svc, _ := newPeopleServiceForTest(t, &fakePeopleMLClient{})
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2291,7 +2293,6 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 	require.True(t, ok, "expected async feedback recluster hooks to be available")
 
 	var runs atomic.Int32
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
@@ -2301,17 +2302,18 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 		hooks.setFeedbackReclusterHookForTest(nil)
 	})
 
+	// Under the coordinator, background and feedback are serialized through a
+	// single worker and feedback has priority. The legacy backgroundBusy flag
+	// no longer defers feedback, so a scheduled feedback runs even while
+	// backgroundBusy is set (no actual background batch is in flight here).
 	svc.setBackgroundBusy(true)
 
 	hooks.scheduleFeedbackRecluster()
-	time.Sleep(40 * time.Millisecond)
-	assert.Zero(t, runs.Load())
-
-	svc.setBackgroundBusy(false)
-
 	waitForPeopleCondition(t, time.Second, func() bool {
 		return runs.Load() == 1
 	})
+
+	svc.setBackgroundBusy(false)
 }
 
 func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T) {
@@ -2319,7 +2321,6 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2328,7 +2329,6 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 	require.True(t, ok, "expected async feedback recluster hooks to be available")
 
 	var runs atomic.Int32
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
@@ -2339,15 +2339,19 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 		svc.setBackgroundBusy(false)
 	})
 
-	svc.setBackgroundBusy(true)
 	hooks.scheduleFeedbackRecluster()
-	time.Sleep(30 * time.Millisecond)
+	waitForPeopleCondition(t, time.Second, func() bool {
+		return runs.Load() == 1
+	})
 
+	// Shutdown stops the coordinator worker (HandleShutdown blocks until the
+	// worker goroutine has exited) and rejects any further clustering requests.
 	require.NoError(t, svc.HandleShutdown())
 
-	svc.setBackgroundBusy(false)
+	// Scheduling after shutdown must be a no-op: no additional feedback run.
+	hooks.scheduleFeedbackRecluster()
 	time.Sleep(50 * time.Millisecond)
-	assert.Zero(t, runs.Load())
+	assert.Equal(t, int32(1), runs.Load())
 }
 
 func TestPeopleServiceCategoryBackfillsPhotos(t *testing.T) {

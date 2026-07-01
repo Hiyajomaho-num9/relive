@@ -8,7 +8,9 @@
       "Bash(cd backend && go build -o bin/relive cmd/relive/main.go)",
       "Bash(go build -o bin/relive cmd/relive/main.go)",
       "Bash(cd frontend && npm run build)",
-      "Bash(npm run build --prefix frontend)"
+      "Bash(npm run build --prefix frontend)",
+      "Bash(go build *)",
+      "Bash(npx vue-tsc *)"
     ]
   },
   "permissionMode": "auto",
