@@ -557,6 +557,7 @@ type PersonResponse struct {
 	AvatarLocked         bool           `json:"avatar_locked"`
 	FaceCount            int            `json:"face_count"`
 	PhotoCount           int            `json:"photo_count"`
+	Hidden               bool           `json:"hidden"`
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
 	Faces                []FaceResponse `json:"faces,omitempty"`
@@ -594,6 +595,14 @@ type SplitPersonRequest struct {
 type MoveFacesRequest struct {
 	FaceIDs        []uint `json:"face_ids" binding:"required,min=1"`
 	TargetPersonID uint   `json:"target_person_id" binding:"required"`
+}
+
+// UpdatePeopleVisibilityRequest 批量设置人物隐藏状态。
+// Hidden=true 表示从人物管理主列表隐藏，false 表示恢复显示。
+// 该操作仅修改 hidden 字段，不触发分类更新、聚类、合并建议重算或照片变更。
+type UpdatePeopleVisibilityRequest struct {
+	PersonIDs []uint `json:"person_ids" binding:"required,min=1"`
+	Hidden    *bool  `json:"hidden" binding:"required"`
 }
 
 // ReclusterResult holds the outcome of an automatic re-clustering pass

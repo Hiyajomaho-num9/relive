@@ -139,3 +139,150 @@ func TestPersonRepository_MergeInto_OnlySourcePhotosAffected(t *testing.T) {
 		assert.Nil(t, gone)
 	}
 }
+
+// TestPersonRepository_ListPeople_VisibilityFilter 验证可见性筛选与分类、搜索组合，
+// 以及返回总数与筛选结果一致。
+func TestPersonRepository_ListPeople_VisibilityFilter(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+
+	repo := NewPersonRepository(db)
+
+	visibleFamily := &model.Person{Name: "Alice", Category: model.PersonCategoryFamily}
+	visibleFriend := &model.Person{Name: "Bob", Category: model.PersonCategoryFriend}
+	hiddenFamily := &model.Person{Name: "Carol", Category: model.PersonCategoryFamily, Hidden: true}
+	hiddenStranger := &model.Person{Name: "Dave", Category: model.PersonCategoryStranger, Hidden: true}
+	for _, p := range []*model.Person{visibleFamily, visibleFriend, hiddenFamily, hiddenStranger} {
+		require.NoError(t, repo.Create(p))
+	}
+
+	listOpts := func(visibility string) ListPeopleOptions {
+		return ListPeopleOptions{Page: 1, PageSize: 100, Visibility: visibility}
+	}
+
+	// visible：仅 2 个显示中
+	people, total, err := repo.ListPeople(listOpts(PersonVisibilityVisible))
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	assert.Len(t, people, 2)
+
+	// hidden：仅 2 个已隐藏
+	people, total, err = repo.ListPeople(listOpts(PersonVisibilityHidden))
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	assert.Len(t, people, 2)
+
+	// all：全部 4 个
+	people, total, err = repo.ListPeople(listOpts(PersonVisibilityAll))
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), total)
+	assert.Len(t, people, 4)
+
+	// 缺省按 all 处理
+	people, total, err = repo.ListPeople(ListPeopleOptions{Page: 1, PageSize: 100})
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), total)
+
+	// 组合：hidden + category=family → 仅 Carol
+	people, total, err = repo.ListPeople(ListPeopleOptions{Page: 1, PageSize: 100, Visibility: PersonVisibilityHidden, Category: model.PersonCategoryFamily})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+	require.Len(t, people, 1)
+	assert.Equal(t, "Carol", people[0].Name)
+
+	// 组合：visible + search="ali" → 仅 Alice
+	people, total, err = repo.ListPeople(ListPeopleOptions{Page: 1, PageSize: 100, Visibility: PersonVisibilityVisible, Search: "ali"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+	require.Len(t, people, 1)
+	assert.Equal(t, "Alice", people[0].Name)
+}
+
+// TestPersonRepository_UpdateVisibility 验证批量隐藏/恢复、去重、返回更新数。
+func TestPersonRepository_UpdateVisibility(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+
+	repo := NewPersonRepository(db)
+
+	p1 := &model.Person{Name: "A", Category: model.PersonCategoryFamily}
+	p2 := &model.Person{Name: "B", Category: model.PersonCategoryFriend}
+	p3 := &model.Person{Name: "C", Category: model.PersonCategoryStranger}
+	for _, p := range []*model.Person{p1, p2, p3} {
+		require.NoError(t, repo.Create(p))
+	}
+
+	// 隐藏 p1、p2，并重复 p1 验证去重
+	updated, err := repo.UpdateVisibility([]uint{p1.ID, p2.ID, p1.ID}, true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), updated)
+
+	got1, err := repo.GetByID(p1.ID)
+	require.NoError(t, err)
+	assert.True(t, got1.Hidden)
+	got3, err := repo.GetByID(p3.ID)
+	require.NoError(t, err)
+	assert.False(t, got3.Hidden)
+
+	// 隐藏分类不应被修改
+	assert.Equal(t, model.PersonCategoryFamily, got1.Category)
+
+	// 恢复 p1
+	updated, err = repo.UpdateVisibility([]uint{p1.ID}, false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated)
+	got1, err = repo.GetByID(p1.ID)
+	require.NoError(t, err)
+	assert.False(t, got1.Hidden)
+
+	// 空切片安全
+	updated, err = repo.UpdateVisibility(nil, true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), updated)
+
+	// 全部不存在的 ID 返回 0（不报错）
+	updated, err = repo.UpdateVisibility([]uint{999999}, true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), updated)
+}
+
+// TestPersonRepository_MergeInto_PreservesTargetHidden 验证合并始终保留目标人物原有隐藏状态。
+func TestPersonRepository_MergeInto_PreservesTargetHidden(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+
+	personRepo := NewPersonRepository(db)
+	faceRepo := NewFaceRepository(db)
+
+	t.Run("hidden target stays hidden after merging visible source", func(t *testing.T) {
+		target := &model.Person{Name: "Target", Category: model.PersonCategoryFamily, Hidden: true}
+		source := &model.Person{Name: "Source", Category: model.PersonCategoryFriend, Hidden: false}
+		require.NoError(t, personRepo.Create(target))
+		require.NoError(t, personRepo.Create(source))
+		require.NoError(t, faceRepo.Create(&model.Face{PhotoID: 1, PersonID: &source.ID, BBoxX: 0.1, BBoxY: 0.1, BBoxWidth: 0.2, BBoxHeight: 0.2, Confidence: 0.9, QualityScore: 0.9}))
+
+		_, err := personRepo.MergeInto(target.ID, []uint{source.ID})
+		require.NoError(t, err)
+
+		targetAfter, err := personRepo.GetByID(target.ID)
+		require.NoError(t, err)
+		require.NotNil(t, targetAfter)
+		assert.True(t, targetAfter.Hidden, "hidden target must stay hidden after merge")
+	})
+
+	t.Run("visible target stays visible after merging hidden source", func(t *testing.T) {
+		target := &model.Person{Name: "Target2", Category: model.PersonCategoryFamily, Hidden: false}
+		source := &model.Person{Name: "Source2", Category: model.PersonCategoryFriend, Hidden: true}
+		require.NoError(t, personRepo.Create(target))
+		require.NoError(t, personRepo.Create(source))
+		require.NoError(t, faceRepo.Create(&model.Face{PhotoID: 2, PersonID: &source.ID, BBoxX: 0.1, BBoxY: 0.1, BBoxWidth: 0.2, BBoxHeight: 0.2, Confidence: 0.9, QualityScore: 0.9}))
+
+		_, err := personRepo.MergeInto(target.ID, []uint{source.ID})
+		require.NoError(t, err)
+
+		targetAfter, err := personRepo.GetByID(target.ID)
+		require.NoError(t, err)
+		require.NotNil(t, targetAfter)
+		assert.False(t, targetAfter.Hidden, "visible target must stay visible after merge")
+	})
+}

@@ -58,13 +58,15 @@ func (h *PeopleHandler) ListPeople(c *gin.Context) {
 	hasAvatar := strings.TrimSpace(c.Query("has_avatar"))
 	category := strings.TrimSpace(c.Query("category"))
 	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
+	visibility := strings.TrimSpace(c.Query("visibility"))
 
 	opts := repository.ListPeopleOptions{
-		Page:      page,
-		PageSize:  pageSize,
-		Category:  category,
-		Search:    search,
-		HasAvatar: hasAvatar == "true",
+		Page:       page,
+		PageSize:   pageSize,
+		Category:   category,
+		Search:     search,
+		HasAvatar:  hasAvatar == "true",
+		Visibility: visibility,
 	}
 
 	people, total, err := h.personRepo.ListPeople(opts)
@@ -366,6 +368,62 @@ func (h *PeopleHandler) MergePeople(c *gin.Context) {
 		Data: gin.H{
 			"job_id": jobID,
 			"status": "pending",
+		},
+	})
+}
+
+// UpdateVisibility 批量设置人物隐藏状态。单个操作复用同一接口。
+// 仅修改 hidden 字段，不触发分类更新、聚类、合并建议重算或照片变更。
+func (h *PeopleHandler) UpdateVisibility(c *gin.Context) {
+	var req model.UpdatePeopleVisibilityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writePeopleError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+
+	// 去重 + 数量限制，防止超大批量请求
+	seen := make(map[uint]struct{}, len(req.PersonIDs))
+	ids := make([]uint, 0, len(req.PersonIDs))
+	for _, id := range req.PersonIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		writePeopleError(c, http.StatusBadRequest, "INVALID_REQUEST", "person_ids 不能为空")
+		return
+	}
+	const maxVisibilityBatch = 500
+	if len(ids) > maxVisibilityBatch {
+		writePeopleError(c, http.StatusBadRequest, "INVALID_REQUEST", "单次最多操作 500 个人物")
+		return
+	}
+
+	updated, err := h.personRepo.UpdateVisibility(ids, *req.Hidden)
+	if err != nil {
+		writePeopleError(c, http.StatusInternalServerError, "UPDATE_FAILED", err.Error())
+		return
+	}
+
+	// 全部 ID 都不存在 → 明确错误；部分不存在则更新其余并返回实际更新数
+	if updated == 0 {
+		writePeopleError(c, http.StatusNotFound, "NOT_FOUND", "未找到任何指定的人物")
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Response{
+		Success: true,
+		Message: "人物可见性已更新",
+		Data: gin.H{
+			"updated":       updated,
+			"requested":     len(ids),
+			"hidden":        *req.Hidden,
+			"missing_count": len(ids) - int(updated),
 		},
 	})
 }
@@ -896,6 +954,7 @@ func personToResponse(person *model.Person, faces []model.FaceResponse) model.Pe
 		AvatarLocked:         person.AvatarLocked,
 		FaceCount:            person.FaceCount,
 		PhotoCount:           person.PhotoCount,
+		Hidden:               person.Hidden,
 		CreatedAt:            person.CreatedAt,
 		UpdatedAt:            person.UpdatedAt,
 		Faces:                faces,

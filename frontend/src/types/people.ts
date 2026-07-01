@@ -1,5 +1,6 @@
 export type PersonCategory = 'family' | 'friend' | 'acquaintance' | 'stranger'
 export type FaceProcessStatus = 'none' | 'pending' | 'processing' | 'ready' | 'no_face' | 'failed'
+export type PeopleVisibility = 'visible' | 'hidden' | 'all'
 
 export interface Face {
   id: number
@@ -29,6 +30,7 @@ export interface Person {
   avatar_locked?: boolean
   face_count: number
   photo_count: number
+  hidden: boolean
   created_at: string
   updated_at: string
   faces?: Face[]
@@ -40,6 +42,14 @@ export interface PeopleListParams {
   category?: PersonCategory
   search?: string
   has_avatar?: string // 'true' 只返回有头像的人物
+  visibility?: PeopleVisibility
+}
+
+export interface UpdateVisibilityResult {
+  updated: number
+  requested: number
+  hidden: boolean
+  missing_count: number
 }
 
 export interface PeopleTask {

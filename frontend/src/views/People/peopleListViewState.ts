@@ -1,4 +1,4 @@
-import type { Person, PersonCategory } from '@/types/people'
+import type { PeopleVisibility, Person, PersonCategory } from '@/types/people'
 
 export type BrowseMode = 'pagination' | 'continuous'
 
@@ -19,6 +19,7 @@ export interface ContinuousViewSnapshot {
   finished: boolean
   search: string
   category: PersonCategory | undefined
+  visibility: PeopleVisibility | undefined
   pageSize: number
   scrollTop: number
 }
@@ -30,6 +31,7 @@ const emptySnapshot: ContinuousViewSnapshot = {
   finished: false,
   search: '',
   category: undefined,
+  visibility: undefined,
   pageSize: 50,
   scrollTop: 0,
 }
@@ -54,12 +56,14 @@ export function saveContinuousSnapshot(data: ContinuousViewSnapshot) {
 export function isContinuousSnapshotUsable(
   search: string,
   category: PersonCategory | undefined,
+  visibility: PeopleVisibility | undefined,
   pageSize: number,
 ): boolean {
   return (
     snapshot.items.length > 0 &&
     snapshot.search === search &&
     snapshot.category === category &&
+    snapshot.visibility === visibility &&
     snapshot.pageSize === pageSize
   )
 }

@@ -93,16 +93,55 @@
                     <el-select v-model="filters.category" clearable placeholder="全部类别" class="header-filter-select">
                       <el-option v-for="option in categoryOptions" :key="option.value" :label="option.label" :value="option.value" />
                     </el-select>
+                    <el-select v-model="filters.visibility" class="header-filter-select visibility-select" @change="handleVisibilityFilterChange">
+                      <el-option v-for="option in visibilityOptions" :key="option.value" :label="option.label" :value="option.value" />
+                    </el-select>
                     <el-button size="small" type="primary" @click="handleSearch">应用筛选</el-button>
                     <el-radio-group v-model="browseMode" size="small" class="mode-toggle" @change="handleModeChange">
                       <el-radio-button value="pagination">翻页</el-radio-button>
                       <el-radio-button value="continuous">连续浏览</el-radio-button>
                     </el-radio-group>
+                    <el-button
+                      size="small"
+                      :type="batchMode ? 'warning' : 'default'"
+                      class="mini-action-btn"
+                      @click="toggleBatchMode"
+                    >
+                      {{ batchMode ? '退出批量' : '批量管理' }}
+                    </el-button>
                     <el-button size="small" plain class="mini-action-btn" @click="handleManualRefresh">刷新</el-button>
                   </div>
                 </template>
               </SectionHeader>
             </template>
+
+            <!-- 批量操作栏：仅在批量管理模式且当前列表有数据时显示 -->
+            <div v-if="batchMode && currentListPeople.length > 0" class="batch-action-bar">
+              <el-checkbox :model-value="allCurrentSelected" @change="allCurrentSelected ? clearSelection() : selectAllCurrent()">
+                {{ allCurrentSelected ? '取消全选' : '全选当前列表' }}
+              </el-checkbox>
+              <span class="batch-selected-count">已选 {{ selectedCount }} 人</span>
+              <div class="batch-actions">
+                <el-button
+                  size="small"
+                  type="default"
+                  :disabled="selectedCount === 0 || visibilitySubmitting"
+                  :loading="visibilitySubmitting"
+                  @click="handleBatchVisibility(false)"
+                >
+                  批量恢复
+                </el-button>
+                <el-button
+                  size="small"
+                  type="warning"
+                  :disabled="selectedCount === 0 || visibilitySubmitting"
+                  :loading="visibilitySubmitting"
+                  @click="handleBatchVisibility(true)"
+                >
+                  批量隐藏
+                </el-button>
+              </div>
+            </div>
 
             <!-- 翻页模式 -->
             <div v-if="browseMode === 'pagination'" v-loading="peopleLoading" class="people-grid-wrap">
@@ -114,9 +153,13 @@
                   :key="personItem.id"
                   :person="personItem"
                   :avatar-failed="avatarFailed"
+                  :selectable="batchMode"
+                  :selected="selectedIds.has(personItem.id)"
                   @detail="goToDetail"
                   @edit="openEditDialog"
                   @avatar-failed="markAvatarFailed"
+                  @toggle-select="toggleSelect"
+                  @visibility="handleVisibilityChange"
                 />
               </div>
             </div>
@@ -134,9 +177,13 @@
                   :key="personItem.id"
                   :person="personItem"
                   :avatar-failed="avatarFailed"
+                  :selectable="batchMode"
+                  :selected="selectedIds.has(personItem.id)"
                   @detail="goToDetail"
                   @edit="openEditDialog"
                   @avatar-failed="markAvatarFailed"
+                  @toggle-select="toggleSelect"
+                  @visibility="handleVisibilityChange"
                 />
               </div>
 
@@ -366,6 +413,16 @@
       :person="editingPerson"
       :loading="editSaving"
       @submit="handleEditSubmit"
+      @merge="handleEditMergeRequest"
+    />
+
+    <PersonMergeConfirmDialog
+      v-model="mergeConfirmVisible"
+      :source="editingPerson"
+      :target="mergeTarget"
+      :loading="mergeSubmitting"
+      :error="mergeError"
+      @confirm="handleMergeConfirm"
     />
   </div>
 </template>
@@ -382,6 +439,7 @@ import { peopleApi } from '@/api/people'
 import type {
   PeopleStats,
   PeopleTask,
+  PeopleVisibility,
   Person,
   PersonCategory,
   PersonMergeSuggestion,
@@ -391,6 +449,7 @@ import type {
 import MergeSuggestionReviewDialog from './MergeSuggestionReviewDialog.vue'
 import PersonCard from './PersonCard.vue'
 import PersonEditDialog from './PersonEditDialog.vue'
+import PersonMergeConfirmDialog from './PersonMergeConfirmDialog.vue'
 import {
   getMergeSuggestionTaskStatusMeta,
   getMergeSuggestionVisibility,
@@ -466,6 +525,74 @@ const markAvatarFailed = (faceId: number) => {
   avatarFailed.value.add(faceId)
 }
 
+// 批量管理模式：卡片显示复选框，可批量隐藏/恢复
+const batchMode = ref(false)
+const selectedIds = ref(new Set<number>())
+const visibilitySubmitting = ref(false)
+
+const clearSelection = () => {
+  selectedIds.value = new Set()
+}
+
+const toggleSelect = (personId: number) => {
+  const next = new Set(selectedIds.value)
+  if (next.has(personId)) {
+    next.delete(personId)
+  } else {
+    next.add(personId)
+  }
+  selectedIds.value = next
+}
+
+const selectedCount = computed(() => selectedIds.value.size)
+
+// 当前列表中可见（已加载）的人物，用于全选范围
+const currentListPeople = computed(() =>
+  browseMode.value === 'continuous' ? continuousPeople.value : people.value,
+)
+
+const allCurrentSelected = computed(
+  () => currentListPeople.value.length > 0 && currentListPeople.value.every(p => selectedIds.value.has(p.id)),
+)
+
+const selectAllCurrent = () => {
+  const next = new Set(selectedIds.value)
+  for (const p of currentListPeople.value) {
+    next.add(p.id)
+  }
+  selectedIds.value = next
+}
+
+const toggleBatchMode = () => {
+  batchMode.value = !batchMode.value
+  if (!batchMode.value) {
+    clearSelection()
+  }
+}
+
+/**
+ * 切换可见性筛选 / 搜索 / 类别 / 浏览模式时清空批量选择，
+ * 避免选中项与当前列表不再对应。
+ */
+const onFilterChange = () => {
+  clearSelection()
+}
+
+/**
+ * 人物隐藏状态变更后是否仍应保留在当前列表中。
+ * visible 列表只保留显示中；hidden 列表只保留已隐藏；all 列表始终保留（仅翻转标记）。
+ */
+const belongsToCurrentVisibility = (person: Person, newHidden: boolean) => {
+  switch (filters.visibility) {
+    case 'visible':
+      return !newHidden
+    case 'hidden':
+      return newHidden
+    default:
+      return true
+  }
+}
+
 const mergeSuggestionTask = ref<PersonMergeSuggestionTask | null>(null)
 const mergeSuggestionStats = ref<PersonMergeSuggestionStats>({
   total: 0,
@@ -522,16 +649,22 @@ const queueProgressPercent = computed(() => {
 const mergeSuggestionVisible = computed(() => getMergeSuggestionVisibility(mergeSuggestionTotal.value, mergeSuggestionLoading.value))
 const mergeSuggestionTaskMeta = computed(() => getMergeSuggestionTaskStatusMeta(mergeSuggestionTask.value))
 
+const parseVisibility = (raw: unknown): PeopleVisibility => {
+  return raw === 'hidden' || raw === 'all' ? (raw as PeopleVisibility) : 'visible'
+}
+
 const filters = reactive<{
   page: number
   page_size: number
   search: string
   category?: PersonCategory
+  visibility: PeopleVisibility
 }>({
   page: Number(route.query.page) || 1,
   page_size: Number(route.query.page_size) || 20,
   search: (route.query.search as string) || '',
   category: (route.query.category as PersonCategory) || undefined,
+  visibility: parseVisibility(route.query.visibility),
 })
 
 const syncFiltersToQuery = () => {
@@ -540,8 +673,15 @@ const syncFiltersToQuery = () => {
   if (filters.page_size !== 20) query.page_size = String(filters.page_size)
   if (filters.search) query.search = filters.search
   if (filters.category) query.category = filters.category
+  if (filters.visibility !== 'visible') query.visibility = filters.visibility
   router.replace({ query })
 }
+
+const visibilityOptions = [
+  { label: '显示中', value: 'visible' as PeopleVisibility },
+  { label: '已隐藏', value: 'hidden' as PeopleVisibility },
+  { label: '全部', value: 'all' as PeopleVisibility },
+]
 
 const categoryOptions = [
   { label: '家人', value: 'family' },
@@ -594,6 +734,7 @@ const loadPeople = async () => {
       page_size: filters.page_size,
       search: filters.search || undefined,
       category: filters.category,
+      visibility: filters.visibility,
     })
     const payload = res.data?.data
     people.value = payload?.items || []
@@ -689,8 +830,22 @@ const loadMergeSuggestionDetail = async (id: number, silent = false) => {
 const handleSearch = async () => {
   filters.page = 1
   avatarFailed.value = new Set()
+  onFilterChange()
   if (browseMode.value === 'continuous') {
     // 切换筛选条件后清空旧数据，从第一页重新加载
+    resetContinuousList()
+    await loadMoreContinuous()
+    return
+  }
+  await loadPeople()
+}
+
+const handleVisibilityFilterChange = async () => {
+  filters.page = 1
+  avatarFailed.value = new Set()
+  onFilterChange()
+  if (browseMode.value === 'continuous') {
+    clearContinuousSnapshot()
     resetContinuousList()
     await loadMoreContinuous()
     return
@@ -749,6 +904,7 @@ const loadMoreContinuous = async () => {
       page_size: CONTINUOUS_PAGE_SIZE,
       search: filters.search || undefined,
       category: filters.category,
+      visibility: filters.visibility,
     })
     // 请求返回后若代际已变（筛选已切换），丢弃结果
     if (myEpoch !== requestEpoch.value) return
@@ -780,7 +936,7 @@ const loadMoreContinuous = async () => {
  * 否则从第一页开始加载。
  */
 const initContinuousMode = async () => {
-  if (isContinuousSnapshotUsable(filters.search, filters.category, CONTINUOUS_PAGE_SIZE)) {
+  if (isContinuousSnapshotUsable(filters.search, filters.category, filters.visibility, CONTINUOUS_PAGE_SIZE)) {
     const snap = getContinuousSnapshot()
     continuousPeople.value = [...snap.items]
     continuousPage.value = snap.nextPage
@@ -810,6 +966,7 @@ const handleModeChange = async (mode: BrowseMode | string) => {
   teardownScrollObserver()
   saveBrowseMode(nextMode)
   avatarFailed.value = new Set()
+  onFilterChange()
   if (nextMode === 'continuous') {
     await initContinuousMode()
   } else {
@@ -860,6 +1017,7 @@ const goToDetail = (personId: number) => {
       finished: continuousFinished.value,
       search: filters.search,
       category: filters.category,
+      visibility: filters.visibility,
       pageSize: CONTINUOUS_PAGE_SIZE,
       scrollTop: container?.scrollTop ?? 0,
     })
@@ -927,6 +1085,207 @@ const handleEditSubmit = async (payload: { name?: string; category?: PersonCateg
     ElMessage.error(error.response?.data?.error?.message || error.message || '保存失败')
   } finally {
     editSaving.value = false
+  }
+}
+
+// ---- 编辑弹框内发起的人物合并 ----
+// 合并方向固定：当前人物（来源）→ 搜索结果中所选人物（目标）
+const mergeConfirmVisible = ref(false)
+const mergeTarget = ref<Person | null>(null)
+const mergeSubmitting = ref(false)
+const mergeError = ref('')
+
+/**
+ * 编辑弹框中点击搜索结果：不自动保存编辑内容，打开合并确认弹框。
+ * 来源人物为当前编辑的人物（使用已保存信息，未提交的姓名/类别修改不参与合并）。
+ */
+const handleEditMergeRequest = (target: Person) => {
+  mergeTarget.value = target
+  mergeError.value = ''
+  mergeConfirmVisible.value = true
+}
+
+/**
+ * 将合并结果同步到翻页与连续浏览两份列表：
+ * - 移除来源人物；
+ * - 若目标人物已在列表中，刷新其照片数/人脸数统计；
+ * - 不重置已加载数据、筛选条件与滚动位置。
+ */
+const applyPersonMerge = async (sourceId: number, targetId: number) => {
+  const removeSource = (list: Person[]) => list.filter(person => person.id !== sourceId)
+  const sourceInPeople = people.value.some(person => person.id === sourceId)
+  const sourceInContinuous = continuousPeople.value.some(person => person.id === sourceId)
+  people.value = removeSource(people.value)
+  continuousPeople.value = removeSource(continuousPeople.value)
+  if (sourceInPeople) {
+    total.value = Math.max(0, total.value - 1)
+  }
+  if (sourceInContinuous) {
+    continuousTotal.value = Math.max(0, continuousTotal.value - 1)
+  }
+
+  // 目标人物可能在当前列表中：拉取最新统计并就地更新
+  const targetInPeople = people.value.some(person => person.id === targetId)
+  const targetInContinuous = continuousPeople.value.some(person => person.id === targetId)
+  if (targetInPeople || targetInContinuous) {
+    try {
+      const res = await peopleApi.getById(targetId)
+      const updated = res.data?.data
+      if (updated) {
+        const patchTarget = (person: Person): Person =>
+          person.id === targetId
+            ? { ...person, photo_count: updated.photo_count, face_count: updated.face_count }
+            : person
+        people.value = people.value.map(patchTarget)
+        continuousPeople.value = continuousPeople.value.map(patchTarget)
+      }
+    } catch {
+      // 统计刷新失败不影响合并已完成的事实，静默忽略
+    }
+  }
+}
+
+/**
+ * 轮询合并任务直到完成/失败/超时。
+ * - completed: 返回 true
+ * - failed: 返回 { failed: true, message }，调用方保留弹框并展示
+ * - 超时（状态未知）: 返回 'timeout'
+ * 轮询单次网络错误不计为失败，继续重试。
+ */
+const pollMergeJob = async (
+  jobId: number,
+): Promise<boolean | 'timeout' | { failed: true; message: string }> => {
+  const maxPolls = 60
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    let job
+    try {
+      const res = await peopleApi.getMergeJob(jobId)
+      job = res.data?.data
+    } catch {
+      // 网络抖动：继续重试
+      continue
+    }
+    if (!job) return 'timeout'
+    if (job.status === 'completed') return true
+    if (job.status === 'failed') {
+      return { failed: true, message: job.error_message || '合并任务失败' }
+    }
+    // pending / processing：继续轮询
+  }
+  return 'timeout'
+}
+
+/**
+ * 确认合并：调用现有异步合并接口并轮询任务状态。
+ * - 提交期间禁用取消与重复确认；
+ * - 合并成功前不提前提示成功；
+ * - 失败/超时保留确认弹框，展示错误，且不从列表移除当前人物。
+ */
+const handleMergeConfirm = async () => {
+  const source = editingPerson.value
+  const target = mergeTarget.value
+  if (!source || !target) return
+  mergeSubmitting.value = true
+  mergeError.value = ''
+  try {
+    const res = await peopleApi.merge(target.id, [source.id])
+    const jobId = res.data?.data?.job_id
+    if (!jobId) {
+      // 未返回任务 ID：视为未知状态，保留弹框，不移除人物
+      mergeError.value = '合并任务未返回任务 ID，请稍后刷新页面查看结果'
+      return
+    }
+    const result = await pollMergeJob(jobId)
+    if (result === 'timeout') {
+      // 状态未知/超时：保留弹框，展示提示，不移除当前人物
+      mergeError.value = '合并任务超时，请稍后刷新页面查看结果'
+      return
+    }
+    if (typeof result === 'object' && result.failed) {
+      // 合并失败：保留确认弹框，展示后端错误信息
+      mergeError.value = result.message
+      return
+    }
+    // 合并成功：关闭两个弹框，更新列表，刷新合并建议，提示
+    mergeConfirmVisible.value = false
+    editDialogVisible.value = false
+    await applyPersonMerge(source.id, target.id)
+    // 刷新合并建议，避免继续显示已失效的建议
+    void loadMergeSuggestions(true)
+    ElMessage.success('人物已合并')
+  } catch (error: any) {
+    // 提交合并请求本身失败：保留确认弹框，展示后端错误信息
+    mergeError.value = error.response?.data?.error?.message || error.message || '合并人物失败'
+  } finally {
+    mergeSubmitting.value = false
+  }
+}
+
+/**
+ * 单个人物隐藏/恢复：本地翻转标记或移除，不重置列表与滚动位置。
+ * 操作可逆，无需二次确认。成功后刷新当前列表并提示结果。
+ */
+const handleVisibilityChange = async (personId: number, hidden: boolean) => {
+  try {
+    await peopleApi.updateVisibility([personId], hidden)
+    // 翻转标记或按可见性筛选移除
+    const patch = (list: Person[]) =>
+      list
+        .map(person => (person.id === personId ? { ...person, hidden } : person))
+        .filter(person => !(person.id === personId && !belongsToCurrentVisibility(person, hidden)))
+    const beforePeople = people.value.length
+    const beforeContinuous = continuousPeople.value.length
+    people.value = patch(people.value)
+    continuousPeople.value = patch(continuousPeople.value)
+    if (people.value.length < beforePeople) {
+      total.value = Math.max(0, total.value - 1)
+    }
+    if (continuousPeople.value.length < beforeContinuous) {
+      continuousTotal.value = Math.max(0, continuousTotal.value - 1)
+    }
+    // 人物移出当前列表后清理其勾选状态，避免悬挂选择
+    if (!belongsToCurrentVisibility({ id: personId } as Person, hidden) && selectedIds.value.has(personId)) {
+      const next = new Set(selectedIds.value)
+      next.delete(personId)
+      selectedIds.value = next
+    }
+    ElMessage.success(hidden ? '已隐藏该人物' : '已恢复显示')
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.error?.message || error.message || '操作失败')
+  }
+}
+
+/**
+ * 批量隐藏/恢复：操作前显示确认弹窗及人物数量。
+ * 成功后清空选择并重新加载列表（翻页重载当前页，连续浏览重置到第一页，避免 offset 漏项）。
+ * 失败时保留列表及勾选状态，允许重试。
+ */
+const handleBatchVisibility = async (hidden: boolean) => {
+  const ids = Array.from(selectedIds.value)
+  if (ids.length === 0) return
+  const action = hidden ? '隐藏' : '恢复显示'
+  try {
+    await ElMessageBox.confirm(
+      `确定要${action}选中的 ${ids.length} 个人物吗？`,
+      `批量${action}确认`,
+      { confirmButtonText: `确认${action}`, cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  visibilitySubmitting.value = true
+  try {
+    const res = await peopleApi.updateVisibility(ids, hidden)
+    const updated = res.data?.data?.updated ?? 0
+    ElMessage.success(`已${action} ${updated} 个人物`)
+    clearSelection()
+    await refreshPeopleForCurrentMode()
+  } catch (error: any) {
+    // 失败时保留列表及勾选状态，允许重试
+    ElMessage.error(error.response?.data?.error?.message || error.message || '批量操作失败')
+  } finally {
+    visibilitySubmitting.value = false
   }
 }
 
@@ -1252,6 +1611,33 @@ onBeforeUnmount(() => {
 
 .header-filter-select {
   width: 130px;
+}
+
+.visibility-select {
+  width: 110px;
+}
+
+.batch-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  background: var(--color-bg-soft);
+  border: 1px solid var(--color-border);
+}
+
+.batch-selected-count {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.batch-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
 }
 
 .people-grid-wrap {

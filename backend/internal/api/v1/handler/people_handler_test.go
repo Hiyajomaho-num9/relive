@@ -958,3 +958,124 @@ func TestPeopleHandlerGetWorkerTasksRequiresRuntimeLease(t *testing.T) {
 	resp := decodeAPIResponse(t, rec)
 	require.False(t, resp.Success)
 }
+
+// TestPeopleHandler_ListPeopleVisibility 验证 visibility 查询参数与响应 hidden 字段。
+func TestPeopleHandler_ListPeopleVisibility(t *testing.T) {
+	handler, _, _, db, _ := newPeopleHandlerForTest(t)
+	fixture := seedPeopleHandlerFixture(t, db)
+
+	// 将 friend 标记为隐藏
+	require.NoError(t, db.Model(&model.Person{}).Where("id = ?", fixture.FriendPerson.ID).Update("hidden", true).Error)
+
+	// visible：仅返回 family（显示中）
+	rec := performJSONRequest(t, http.MethodGet, "/api/v1/people?visibility=visible&page=1&page_size=20", nil, nil, handler.ListPeople)
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp := decodeAPIResponse(t, rec)
+	require.True(t, resp.Success)
+	payload := decodeResponseData[peopleListPayload](t, resp)
+	assert.Equal(t, int64(1), payload.Total)
+	require.Len(t, payload.Items, 1)
+	assert.Equal(t, fixture.FamilyPerson.ID, payload.Items[0].ID)
+	assert.False(t, payload.Items[0].Hidden)
+
+	// hidden：仅返回 friend（已隐藏）
+	rec = performJSONRequest(t, http.MethodGet, "/api/v1/people?visibility=hidden&page=1&page_size=20", nil, nil, handler.ListPeople)
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp = decodeAPIResponse(t, rec)
+	payload = decodeResponseData[peopleListPayload](t, resp)
+	assert.Equal(t, int64(1), payload.Total)
+	require.Len(t, payload.Items, 1)
+	assert.Equal(t, fixture.FriendPerson.ID, payload.Items[0].ID)
+	assert.True(t, payload.Items[0].Hidden)
+
+	// all：返回全部
+	rec = performJSONRequest(t, http.MethodGet, "/api/v1/people?visibility=all&page=1&page_size=20", nil, nil, handler.ListPeople)
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp = decodeAPIResponse(t, rec)
+	payload = decodeResponseData[peopleListPayload](t, resp)
+	assert.Equal(t, int64(2), payload.Total)
+	assert.Len(t, payload.Items, 2)
+
+	// 缺省按 all 处理
+	rec = performJSONRequest(t, http.MethodGet, "/api/v1/people?page=1&page_size=20", nil, nil, handler.ListPeople)
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp = decodeAPIResponse(t, rec)
+	payload = decodeResponseData[peopleListPayload](t, resp)
+	assert.Equal(t, int64(2), payload.Total)
+}
+
+// TestPeopleHandler_UpdateVisibility 验证批量隐藏/恢复、参数校验、不存在 ID 行为及副作用隔离。
+func TestPeopleHandler_UpdateVisibility(t *testing.T) {
+	handler, _, _, db, _ := newPeopleHandlerForTest(t)
+	fixture := seedPeopleHandlerFixture(t, db)
+
+	// 记录 family 原始分类，用于验证隐藏操作不修改分类
+	originalCategory := fixture.FamilyPerson.Category
+
+	t.Run("batch hide then restore", func(t *testing.T) {
+		body := []byte(`{"person_ids":[` + strconv.FormatUint(uint64(fixture.FamilyPerson.ID), 10) + `],"hidden":true}`)
+		rec := performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		require.Equal(t, http.StatusOK, rec.Code)
+		resp := decodeAPIResponse(t, rec)
+		require.True(t, resp.Success)
+		data := decodeResponseData[map[string]interface{}](t, resp)
+		assert.EqualValues(t, 1, data["updated"])
+
+		// 验证 DB：hidden=true，category 未变
+		var got model.Person
+		require.NoError(t, db.First(&got, fixture.FamilyPerson.ID).Error)
+		assert.True(t, got.Hidden)
+		assert.Equal(t, originalCategory, got.Category)
+
+		// 恢复
+		body = []byte(`{"person_ids":[` + strconv.FormatUint(uint64(fixture.FamilyPerson.ID), 10) + `],"hidden":false}`)
+		rec = performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NoError(t, db.First(&got, fixture.FamilyPerson.ID).Error)
+		assert.False(t, got.Hidden)
+	})
+
+	t.Run("dedup and missing ids", func(t *testing.T) {
+		// 部分不存在：更新存在的，返回 updated=1，missing_count=1
+		body := []byte(`{"person_ids":[` + strconv.FormatUint(uint64(fixture.FriendPerson.ID), 10) + `,999999],"hidden":true}`)
+		rec := performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		require.Equal(t, http.StatusOK, rec.Code)
+		resp := decodeAPIResponse(t, rec)
+		require.True(t, resp.Success)
+		data := decodeResponseData[map[string]interface{}](t, resp)
+		assert.EqualValues(t, 1, data["updated"])
+		assert.EqualValues(t, 1, data["missing_count"])
+
+		// 全部不存在：404
+		body = []byte(`{"person_ids":[999998,999999],"hidden":true}`)
+		rec = performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("empty person_ids rejected", func(t *testing.T) {
+		body := []byte(`{"person_ids":[],"hidden":true}`)
+		rec := performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("missing hidden field rejected", func(t *testing.T) {
+		body := []byte(`{"person_ids":[` + strconv.FormatUint(uint64(fixture.FamilyPerson.ID), 10) + `]}`)
+		rec := performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("hidden does not change top_person_category", func(t *testing.T) {
+		// 记录 photoOne 的 top_person_category，隐藏 family 后应保持不变
+		var photoBefore model.Photo
+		require.NoError(t, db.First(&photoBefore, fixture.PhotoOne.ID).Error)
+		categoryBefore := photoBefore.TopPersonCategory
+
+		body := []byte(`{"person_ids":[` + strconv.FormatUint(uint64(fixture.FamilyPerson.ID), 10) + `],"hidden":true}`)
+		rec := performJSONRequest(t, http.MethodPatch, "/api/v1/people/visibility", body, nil, handler.UpdateVisibility)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var photoAfter model.Photo
+		require.NoError(t, db.First(&photoAfter, fixture.PhotoOne.ID).Error)
+		assert.Equal(t, categoryBefore, photoAfter.TopPersonCategory)
+	})
+}

@@ -1,5 +1,34 @@
 <template>
-  <div class="person-card">
+  <div class="person-card" :class="{ 'is-selected': selected, 'is-hidden': person.hidden }">
+    <!-- 批量选择复选框（仅批量管理模式显示） -->
+    <div v-if="selectable" class="person-card-select">
+      <el-checkbox
+        :model-value="selected"
+        :aria-label="`选择「${displayName}」`"
+        @change="emit('toggle-select', person.id)"
+        @click.stop
+      />
+    </div>
+
+    <!-- 操作菜单：隐藏 / 恢复显示 -->
+    <el-dropdown
+      class="person-card-menu"
+      trigger="click"
+      placement="bottom-end"
+      @command="onMenuCommand"
+      @click.stop
+    >
+      <button type="button" class="person-card-menu-btn" aria-label="人物操作菜单" @click.stop>
+        <el-icon><MoreFilled /></el-icon>
+      </button>
+      <template #dropdown>
+        <el-dropdown-menu>
+          <el-dropdown-item v-if="!person.hidden" command="hide">隐藏人物</el-dropdown-item>
+          <el-dropdown-item v-else command="restore">恢复显示</el-dropdown-item>
+        </el-dropdown-menu>
+      </template>
+    </el-dropdown>
+
     <!-- 头像：点击进入人物详情页 -->
     <button
       type="button"
@@ -45,6 +74,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { MoreFilled } from '@element-plus/icons-vue'
 import type { Person } from '@/types/people'
 import { getPersonAvatarFallback, getPersonCategoryLabel } from './peopleHelpers'
 
@@ -52,12 +82,19 @@ const props = defineProps<{
   person: Person
   /** 头像加载失败的 faceId 集合（由父组件持有，便于刷新时统一重置） */
   avatarFailed: Set<number>
+  /** 是否处于批量管理模式（显示复选框） */
+  selectable?: boolean
+  /** 当前是否被选中（批量管理模式） */
+  selected?: boolean
 }>()
 
 const emit = defineEmits<{
   detail: [personId: number]
   edit: [person: Person]
   'avatar-failed': [faceId: number]
+  'toggle-select': [personId: number]
+  /** 设置人物可见性，payload 为目标隐藏状态 */
+  visibility: [personId: number, hidden: boolean]
 }>()
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'
@@ -75,10 +112,19 @@ const avatarAriaLabel = computed(() =>
 const nameAriaLabel = computed(() =>
   hasName.value ? `编辑「${displayName.value}」的人物信息` : '设置人物姓名',
 )
+
+const onMenuCommand = (command: string) => {
+  if (command === 'hide') {
+    emit('visibility', props.person.id, true)
+  } else if (command === 'restore') {
+    emit('visibility', props.person.id, false)
+  }
+}
 </script>
 
 <style scoped>
 .person-card {
+  position: relative;
   width: 100%;
   border: 1px solid var(--color-border);
   border-radius: 16px;
@@ -90,6 +136,54 @@ const nameAriaLabel = computed(() =>
   text-align: left;
   /* 网格行内等高：拉伸到行高，内部纵向排列 */
   height: 100%;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.person-card.is-selected {
+  border-color: var(--color-primary, #d46b08);
+  box-shadow: 0 0 0 2px rgba(212, 107, 8, 0.18);
+}
+
+.person-card.is-hidden {
+  opacity: 0.62;
+}
+
+.person-card-select {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.person-card-menu {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+}
+
+.person-card-menu-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.person-card-menu-btn:hover {
+  background: var(--color-bg-soft);
+  color: var(--color-text-primary);
 }
 
 /* 头像按钮：1:1 圆角方形，懒加载，失败显示兜底 */

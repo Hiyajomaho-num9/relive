@@ -258,6 +258,7 @@ func Setup(db *gorm.DB, cfg *config.Config, appState *lifecycle.State) (*gin.Eng
 				people.POST("/merge-suggestions/:id/apply", handlers.People.ApplyMergeSuggestion)
 				people.POST("/merge", handlers.People.MergePeople)
 				people.GET("/merge-jobs/:job_id", handlers.People.GetMergeJob)
+				people.PATCH("/visibility", handlers.People.UpdateVisibility)
 				people.POST("/split", handlers.People.SplitPerson)
 				people.POST("/move-faces", handlers.People.MoveFaces)
 				people.GET("", handlers.People.ListPeople)

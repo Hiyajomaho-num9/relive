@@ -30,6 +30,10 @@ type Person struct {
 	AvatarLocked         bool  `gorm:"not null;default:false" json:"avatar_locked"`
 	FaceCount            int   `gorm:"not null;default:0" json:"face_count"`
 	PhotoCount           int   `gorm:"not null;default:0" json:"photo_count"`
+
+	// Hidden 仅控制人物是否出现在人物管理主列表，与人物分类完全独立，
+	// 不影响照片展示、人物识别、聚类、合并建议及合并/移动候选。
+	Hidden bool `gorm:"not null;default:false;index:idx_people_hidden" json:"hidden"`
 }
 
 func (Person) TableName() string {
