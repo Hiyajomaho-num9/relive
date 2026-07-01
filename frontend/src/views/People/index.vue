@@ -109,34 +109,15 @@
               <el-empty v-if="!peopleLoading && people.length === 0" description="暂无人物数据" />
 
               <div v-else class="people-card-grid">
-                <button
+                <PersonCard
                   v-for="personItem in people"
                   :key="personItem.id"
-                  type="button"
-                  class="person-card"
-                  @click="goToDetail(personItem.id)"
-                >
-                  <div class="person-card-avatar">
-                    <img
-                      v-if="personItem.representative_face_id && !avatarFailed.has(personItem.representative_face_id)"
-                      :src="getFaceThumbnail(personItem.representative_face_id)"
-                      loading="lazy"
-                      alt=""
-                      @error="markAvatarFailed(personItem.representative_face_id!)"
-                    />
-                    <span v-else class="person-card-avatar-fallback">{{ getPersonAvatarFallback(personItem) }}</span>
-                  </div>
-
-                  <div class="person-card-body">
-                    <div class="person-card-title-row">
-                      <span class="person-card-name">{{ getPersonName(personItem) }}</span>
-                      <span class="person-card-category" :class="`is-${personItem.category}`">
-                        {{ getPersonCategoryLabel(personItem.category) }}
-                      </span>
-                    </div>
-                    <div class="person-card-counts">{{ personItem.photo_count }} 张照片</div>
-                  </div>
-                </button>
+                  :person="personItem"
+                  :avatar-failed="avatarFailed"
+                  @detail="goToDetail"
+                  @edit="openEditDialog"
+                  @avatar-failed="markAvatarFailed"
+                />
               </div>
             </div>
 
@@ -148,34 +129,15 @@
               />
 
               <div v-if="continuousPeople.length > 0" class="people-card-grid">
-                <button
+                <PersonCard
                   v-for="personItem in continuousPeople"
                   :key="personItem.id"
-                  type="button"
-                  class="person-card"
-                  @click="goToDetail(personItem.id)"
-                >
-                  <div class="person-card-avatar">
-                    <img
-                      v-if="personItem.representative_face_id && !avatarFailed.has(personItem.representative_face_id)"
-                      :src="getFaceThumbnail(personItem.representative_face_id)"
-                      loading="lazy"
-                      alt=""
-                      @error="markAvatarFailed(personItem.representative_face_id!)"
-                    />
-                    <span v-else class="person-card-avatar-fallback">{{ getPersonAvatarFallback(personItem) }}</span>
-                  </div>
-
-                  <div class="person-card-body">
-                    <div class="person-card-title-row">
-                      <span class="person-card-name">{{ getPersonName(personItem) }}</span>
-                      <span class="person-card-category" :class="`is-${personItem.category}`">
-                        {{ getPersonCategoryLabel(personItem.category) }}
-                      </span>
-                    </div>
-                    <div class="person-card-counts">{{ personItem.photo_count }} 张照片</div>
-                  </div>
-                </button>
+                  :person="personItem"
+                  :avatar-failed="avatarFailed"
+                  @detail="goToDetail"
+                  @edit="openEditDialog"
+                  @avatar-failed="markAvatarFailed"
+                />
               </div>
 
               <!-- 触底哨兵 + 状态条 -->
@@ -398,6 +360,13 @@
       @exclude="handleExcludeMergeSuggestion"
       @apply="handleApplyMergeSuggestion"
     />
+
+    <PersonEditDialog
+      v-model="editDialogVisible"
+      :person="editingPerson"
+      :loading="editSaving"
+      @submit="handleEditSubmit"
+    />
   </div>
 </template>
 
@@ -420,6 +389,8 @@ import type {
   PersonMergeSuggestionTask,
 } from '@/types/people'
 import MergeSuggestionReviewDialog from './MergeSuggestionReviewDialog.vue'
+import PersonCard from './PersonCard.vue'
+import PersonEditDialog from './PersonEditDialog.vue'
 import {
   getMergeSuggestionTaskStatusMeta,
   getMergeSuggestionVisibility,
@@ -590,8 +561,6 @@ const taskPhaseLabel = computed(() => {
       return '当前状态'
   }
 })
-
-const getPersonName = (person: Person) => person.name?.trim() || `未命名人物 #${person.id}`
 
 const getFaceThumbnail = (faceId?: number) => {
   if (!faceId) return ''
@@ -899,6 +868,66 @@ const goToDetail = (personId: number) => {
     path: `/people/${personId}`,
     query: { ...route.query }
   })
+}
+
+// 人物信息快捷编辑弹框
+const editDialogVisible = ref(false)
+const editingPerson = ref<Person | null>(null)
+const editSaving = ref(false)
+
+const openEditDialog = (person: Person) => {
+  editingPerson.value = person
+  editDialogVisible.value = true
+}
+
+/**
+ * 将编辑结果同步到翻页与连续浏览两份列表，不重置已加载数据与滚动位置。
+ * 若类别变更后不再符合当前类别筛选，则将该人物从列表移除并更新显示数量。
+ */
+const applyPersonEdit = (
+  personId: number,
+  updates: { name?: string; category?: PersonCategory },
+) => {
+  const patch = (person: Person): Person => (person.id === personId ? { ...person, ...updates } : person)
+  people.value = people.value.map(patch)
+  continuousPeople.value = continuousPeople.value.map(patch)
+
+  if (updates.category !== undefined && filters.category && updates.category !== filters.category) {
+    const inPeople = people.value.some(person => person.id === personId)
+    const inContinuous = continuousPeople.value.some(person => person.id === personId)
+    if (inPeople) {
+      people.value = people.value.filter(person => person.id !== personId)
+      total.value = Math.max(0, total.value - 1)
+    }
+    if (inContinuous) {
+      continuousPeople.value = continuousPeople.value.filter(person => person.id !== personId)
+      continuousTotal.value = Math.max(0, continuousTotal.value - 1)
+    }
+  }
+}
+
+const handleEditSubmit = async (payload: { name?: string; category?: PersonCategory }) => {
+  const person = editingPerson.value
+  if (!person) return
+  editSaving.value = true
+  try {
+    const tasks: Promise<unknown>[] = []
+    if (payload.name !== undefined) {
+      tasks.push(peopleApi.updateName(person.id, payload.name))
+    }
+    if (payload.category !== undefined) {
+      tasks.push(peopleApi.updateCategory(person.id, payload.category))
+    }
+    await Promise.all(tasks)
+    applyPersonEdit(person.id, payload)
+    ElMessage.success('人物信息已更新')
+    editDialogVisible.value = false
+  } catch (error: any) {
+    // 保留弹框内容，仅提示错误，便于用户重试
+    ElMessage.error(error.response?.data?.error?.message || error.message || '保存失败')
+  } finally {
+    editSaving.value = false
+  }
 }
 
 const refreshCurrentTab = async () => {
@@ -1236,61 +1265,8 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
-.person-card {
-  width: 100%;
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  padding: 10px;
-  background: #fff;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  text-align: left;
-  cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-}
+/* 人物卡片样式由 PersonCard.vue 自带 scoped 样式管理 */
 
-.person-card:hover {
-  transform: translateY(-2px);
-  border-color: rgba(212, 107, 8, 0.28);
-  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
-}
-
-/* 1:1 圆角方形大头像，懒加载，失败显示兜底 */
-.person-card-avatar {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  border-radius: 12px;
-  overflow: hidden;
-  background: var(--color-bg-soft);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.person-card-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.person-card-avatar-fallback {
-  font-size: 30px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.person-card-body {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 0 2px 2px;
-}
-
-.person-card-title-row,
 .merge-suggestion-header,
 .queue-progress-header {
   display: flex;
@@ -1299,7 +1275,6 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.person-card-name,
 .merge-suggestion-title {
   font-weight: 600;
   font-size: 14px;
@@ -1311,37 +1286,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-/* 类别标签：低饱和度配色，完整不省略 */
-.person-card-category {
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.person-card-category.is-family {
-  background: rgba(245, 108, 108, 0.12);
-  color: #c45656;
-}
-
-.person-card-category.is-friend {
-  background: rgba(103, 194, 58, 0.14);
-  color: #5a9a3a;
-}
-
-.person-card-category.is-acquaintance {
-  background: rgba(230, 162, 60, 0.14);
-  color: #b8821f;
-}
-
-.person-card-category.is-stranger {
-  background: rgba(144, 147, 153, 0.14);
-  color: #8a8d93;
-}
-
 .merge-suggestion-meta,
 .merge-suggestion-subtitle {
   display: flex;
@@ -1350,7 +1294,6 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-.person-card-counts,
 .merge-suggestion-meta,
 .merge-suggestion-subtitle {
   font-size: 12px;
