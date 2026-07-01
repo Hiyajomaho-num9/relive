@@ -1,6 +1,6 @@
 # Dynamic People Identity Profiles Design
 
-**Date:** 2026-07-01  
+**Date:** 2026-07-01
 **Status:** Approved
 
 ## Goal
@@ -270,4 +270,3 @@ Performance measures:
 - Rewriting historical face assignments during backfill.
 - Removing the legacy prototype matcher before shadow and rescue evidence exists.
 - Building a generic external vector database.
-
