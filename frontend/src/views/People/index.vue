@@ -1,5 +1,5 @@
 <template>
-  <div class="people-page">
+  <div ref="peoplePageRef" class="people-page">
     <PageHeader title="人物管理" subtitle="按人物维度浏览聚类结果，查看后台进度，并集中审核系统给出的合并建议" :gradient="true">
       <template #actions>
         <el-button class="header-action-btn" @click="refreshCurrentTab">
@@ -11,85 +11,22 @@
     <el-tabs v-model="activeTab" class="people-tabs">
       <el-tab-pane label="人物列表" name="people">
         <div class="section-stack">
-          <el-card shadow="never" class="section-card people-list-card animate-fade-in">
+          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card merge-suggestion-card-wrap animate-fade-in">
             <template #header>
-              <SectionHeader :icon="User" :title="`人物列表（共 ${total} 人）`">
-                <template #actions>
-                  <div class="people-header-filters">
-                    <el-input
-                      v-model="filters.search"
-                      clearable
-                      placeholder="搜索人物姓名 / ID / 类别"
-                      class="header-filter-input"
-                      @keyup.enter="handleSearch"
-                      @clear="handleSearch"
-                    />
-                    <el-select v-model="filters.category" clearable placeholder="全部类别" class="header-filter-select">
-                      <el-option v-for="option in categoryOptions" :key="option.value" :label="option.label" :value="option.value" />
-                    </el-select>
-                    <el-button size="small" type="primary" @click="handleSearch">应用筛选</el-button>
-                    <el-button size="small" plain class="mini-action-btn" @click="loadPeople">刷新</el-button>
-                  </div>
-                </template>
-              </SectionHeader>
-            </template>
-
-            <div v-loading="peopleLoading" class="people-grid-wrap">
-              <el-empty v-if="!peopleLoading && people.length === 0" description="暂无人物数据" />
-
-              <div v-else class="people-card-grid">
-                <button
-                  v-for="personItem in people"
-                  :key="personItem.id"
-                  type="button"
-                  class="person-card"
-                  @click="goToDetail(personItem.id)"
-                >
-                  <el-avatar :size="44" :src="getFaceThumbnail(personItem.representative_face_id)" class="person-card-avatar">
-                    {{ getPersonAvatarFallback(personItem) }}
-                  </el-avatar>
-
-                  <div class="person-card-body">
-                    <div class="person-card-title-row">
-                      <span class="person-card-name">{{ getPersonName(personItem) }}</span>
-                      <span class="person-card-id">{{ `#${personItem.id}` }}</span>
-                    </div>
-                    <div class="person-card-meta">
-                      <el-tag :type="categoryTagType(personItem.category)" effect="light" size="small">
-                        {{ getPersonCategoryLabel(personItem.category) }}
-                      </el-tag>
-                      <span class="person-card-counts">{{ personItem.photo_count }} 照片 · {{ personItem.face_count }} 人脸</span>
-                    </div>
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            <div v-if="total > 0" class="pagination-wrap">
-              <el-pagination
-                background
-                layout="total, sizes, prev, pager, next"
-                :current-page="filters.page"
-                :page-size="filters.page_size"
-                :page-sizes="[10, 20, 50, 100]"
-                :total="total"
-                @current-change="handlePageChange"
-                @size-change="handlePageSizeChange"
-              />
-            </div>
-          </el-card>
-
-          <el-card v-if="mergeSuggestionVisible" shadow="never" class="section-card animate-fade-in animate-delay-1">
-            <template #header>
-              <SectionHeader :icon="Connection" :title="`人物合并建议（${mergeSuggestionTotal}）`">
+              <SectionHeader :icon="Connection" :title="`人物合并建议（待审核 ${mergeSuggestionTotal}）`">
                 <template #actions>
                   <el-button size="small" plain class="mini-action-btn" @click="loadMergeSuggestions">刷新</el-button>
+                  <el-button size="small" text class="mini-action-btn" @click="mergeSuggestionCollapsed = !mergeSuggestionCollapsed">
+                    {{ mergeSuggestionCollapsed ? '展开' : '收起' }}
+                  </el-button>
                 </template>
               </SectionHeader>
             </template>
 
-            <div v-loading="mergeSuggestionLoading" class="merge-suggestion-list">
-              <div v-if="mergeSuggestions.length > 0" class="merge-suggestion-grid">
+            <el-collapse-transition>
+              <div v-show="!mergeSuggestionCollapsed">
+                <div v-loading="mergeSuggestionLoading" class="merge-suggestion-list">
+                  <div v-if="mergeSuggestions.length > 0" class="merge-suggestion-grid">
                 <div v-for="suggestion in mergeSuggestions" :key="suggestion.id" class="merge-suggestion-card">
                   <div class="merge-suggestion-header">
                     <div class="merge-suggestion-target">
@@ -137,6 +74,135 @@
                 </div>
               </div>
               <el-empty v-else description="当前没有待审核的人物合并建议" />
+                </div>
+              </div>
+            </el-collapse-transition>
+          </el-card>
+
+          <el-card shadow="never" class="section-card people-list-card animate-fade-in animate-delay-1">
+            <template #header>
+              <SectionHeader :icon="User" :title="`人物列表（共 ${displayTotal} 人）`">
+                <template #actions>
+                  <div class="people-header-filters">
+                    <el-input
+                      v-model="filters.search"
+                      clearable
+                      placeholder="搜索人物姓名 / ID / 类别"
+                      class="header-filter-input"
+                      @keyup.enter="handleSearch"
+                      @clear="handleSearch"
+                    />
+                    <el-select v-model="filters.category" clearable placeholder="全部类别" class="header-filter-select">
+                      <el-option v-for="option in categoryOptions" :key="option.value" :label="option.label" :value="option.value" />
+                    </el-select>
+                    <el-button size="small" type="primary" @click="handleSearch">应用筛选</el-button>
+                    <el-radio-group v-model="browseMode" size="small" class="mode-toggle" @change="handleModeChange">
+                      <el-radio-button value="pagination">翻页</el-radio-button>
+                      <el-radio-button value="continuous">连续浏览</el-radio-button>
+                    </el-radio-group>
+                    <el-button size="small" plain class="mini-action-btn" @click="handleManualRefresh">刷新</el-button>
+                  </div>
+                </template>
+              </SectionHeader>
+            </template>
+
+            <!-- 翻页模式 -->
+            <div v-if="browseMode === 'pagination'" v-loading="peopleLoading" class="people-grid-wrap">
+              <el-empty v-if="!peopleLoading && people.length === 0" description="暂无人物数据" />
+
+              <div v-else class="people-card-grid">
+                <button
+                  v-for="personItem in people"
+                  :key="personItem.id"
+                  type="button"
+                  class="person-card"
+                  @click="goToDetail(personItem.id)"
+                >
+                  <div class="person-card-avatar">
+                    <img
+                      v-if="personItem.representative_face_id && !avatarFailed.has(personItem.representative_face_id)"
+                      :src="getFaceThumbnail(personItem.representative_face_id)"
+                      loading="lazy"
+                      alt=""
+                      @error="markAvatarFailed(personItem.representative_face_id!)"
+                    />
+                    <span v-else class="person-card-avatar-fallback">{{ getPersonAvatarFallback(personItem) }}</span>
+                  </div>
+
+                  <div class="person-card-body">
+                    <div class="person-card-title-row">
+                      <span class="person-card-name">{{ getPersonName(personItem) }}</span>
+                      <span class="person-card-category" :class="`is-${personItem.category}`">
+                        {{ getPersonCategoryLabel(personItem.category) }}
+                      </span>
+                    </div>
+                    <div class="person-card-counts">{{ personItem.photo_count }} 张照片</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            <!-- 连续浏览模式 -->
+            <div v-else class="people-grid-wrap">
+              <el-empty
+                v-if="!continuousLoading && !continuousError && continuousPeople.length === 0"
+                description="暂无人物数据"
+              />
+
+              <div v-if="continuousPeople.length > 0" class="people-card-grid">
+                <button
+                  v-for="personItem in continuousPeople"
+                  :key="personItem.id"
+                  type="button"
+                  class="person-card"
+                  @click="goToDetail(personItem.id)"
+                >
+                  <div class="person-card-avatar">
+                    <img
+                      v-if="personItem.representative_face_id && !avatarFailed.has(personItem.representative_face_id)"
+                      :src="getFaceThumbnail(personItem.representative_face_id)"
+                      loading="lazy"
+                      alt=""
+                      @error="markAvatarFailed(personItem.representative_face_id!)"
+                    />
+                    <span v-else class="person-card-avatar-fallback">{{ getPersonAvatarFallback(personItem) }}</span>
+                  </div>
+
+                  <div class="person-card-body">
+                    <div class="person-card-title-row">
+                      <span class="person-card-name">{{ getPersonName(personItem) }}</span>
+                      <span class="person-card-category" :class="`is-${personItem.category}`">
+                        {{ getPersonCategoryLabel(personItem.category) }}
+                      </span>
+                    </div>
+                    <div class="person-card-counts">{{ personItem.photo_count }} 张照片</div>
+                  </div>
+                </button>
+              </div>
+
+              <!-- 触底哨兵 + 状态条 -->
+              <div ref="sentinelRef" class="continuous-sentinel" />
+
+              <div v-if="continuousLoading" class="continuous-status">加载中…</div>
+              <div v-else-if="continuousError" class="continuous-status continuous-error">
+                加载失败，<el-button text type="primary" class="retry-link" @click="loadMoreContinuous">重试</el-button>
+              </div>
+              <div v-else-if="continuousFinished && continuousPeople.length > 0" class="continuous-status">
+                已加载全部 {{ continuousTotal }} 人
+              </div>
+            </div>
+
+            <div v-if="browseMode === 'pagination' && total > 0" class="pagination-wrap">
+              <el-pagination
+                background
+                layout="total, sizes, prev, pager, next"
+                :current-page="filters.page"
+                :page-size="filters.page_size"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="total"
+                @current-change="handlePageChange"
+                @size-change="handlePageSizeChange"
+              />
             </div>
           </el-card>
         </div>
@@ -363,10 +429,21 @@ import {
   getPersonAvatarFallback,
   getPersonCategoryLabel,
 } from './peopleHelpers'
+import {
+  type BrowseMode,
+  clearContinuousSnapshot,
+  getContinuousSnapshot,
+  isContinuousSnapshotUsable,
+  loadBrowseMode,
+  saveBrowseMode,
+  saveContinuousSnapshot,
+} from './peopleListViewState'
 
 const route = useRoute()
 const router = useRouter()
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'
+
+const peoplePageRef = ref<HTMLElement | null>(null)
 
 const activeTab = ref<'people' | 'task'>('people')
 const peopleLoading = ref(false)
@@ -389,6 +466,31 @@ const stats = ref<PeopleStats>({
 const backgroundLogs = ref<string[]>([])
 const people = ref<Person[]>([])
 const total = ref(0)
+
+// 合并建议默认收起，突出待审核事项
+const mergeSuggestionCollapsed = ref(true)
+
+// 浏览模式：翻页 / 连续浏览，记忆用户最后选择
+const browseMode = ref<BrowseMode>(loadBrowseMode())
+
+// 连续浏览模式状态
+const CONTINUOUS_PAGE_SIZE = 50
+const continuousPeople = ref<Person[]>([])
+const continuousPage = ref(1)
+const continuousTotal = ref(0)
+const continuousFinished = ref(false)
+const continuousLoading = ref(false)
+const continuousError = ref(false)
+// 请求代际：切换筛选时递增，用于丢弃过期请求结果，避免旧数据覆盖新筛选结果
+const requestEpoch = ref(0)
+const sentinelRef = ref<HTMLElement | null>(null)
+let scrollObserver: IntersectionObserver | null = null
+
+// 头像加载失败的 faceId 集合，失败后显示兜底内容
+const avatarFailed = ref(new Set<number>())
+const markAvatarFailed = (faceId: number) => {
+  avatarFailed.value.add(faceId)
+}
 
 const mergeSuggestionTask = ref<PersonMergeSuggestionTask | null>(null)
 const mergeSuggestionStats = ref<PersonMergeSuggestionStats>({
@@ -486,24 +588,29 @@ const taskPhaseLabel = computed(() => {
   }
 })
 
-const categoryTagType = (category: PersonCategory) => {
-  switch (category) {
-    case 'family':
-      return 'danger'
-    case 'friend':
-      return 'success'
-    case 'acquaintance':
-      return 'warning'
-    default:
-      return 'info'
-  }
-}
-
 const getPersonName = (person: Person) => person.name?.trim() || `未命名人物 #${person.id}`
 
 const getFaceThumbnail = (faceId?: number) => {
   if (!faceId) return ''
   return `${apiBaseUrl}/faces/${faceId}/thumbnail?v=${faceId}`
+}
+
+const displayTotal = computed(() =>
+  browseMode.value === 'continuous' ? continuousTotal.value : total.value,
+)
+
+/**
+ * 获取内容区滚动容器（el-main）。连续浏览模式下用于触底检测与滚动位置恢复。
+ */
+const getScrollContainer = (): HTMLElement | null => {
+  let el: HTMLElement | null = peoplePageRef.value
+  while (el && el !== document.body) {
+    if (el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY !== 'visible') {
+      return el
+    }
+    el = el.parentElement
+  }
+  return document.scrollingElement as HTMLElement | null
 }
 
 const loadPeople = async () => {
@@ -609,6 +716,13 @@ const loadMergeSuggestionDetail = async (id: number, silent = false) => {
 
 const handleSearch = async () => {
   filters.page = 1
+  avatarFailed.value = new Set()
+  if (browseMode.value === 'continuous') {
+    // 切换筛选条件后清空旧数据，从第一页重新加载
+    resetContinuousList()
+    await loadMoreContinuous()
+    return
+  }
   await loadPeople()
 }
 
@@ -623,7 +737,161 @@ const handlePageSizeChange = async (pageSize: number) => {
   await loadPeople()
 }
 
+const handleManualRefresh = async () => {
+  avatarFailed.value = new Set()
+  if (browseMode.value === 'continuous') {
+    resetContinuousList()
+    await loadMoreContinuous()
+    return
+  }
+  await loadPeople()
+}
+
+/**
+ * 重置连续浏览列表为空，并递增请求代际，使在途请求结果作废。
+ */
+const resetContinuousList = () => {
+  requestEpoch.value += 1
+  continuousPeople.value = []
+  continuousPage.value = 1
+  continuousTotal.value = 0
+  continuousFinished.value = false
+  continuousError.value = false
+  continuousLoading.value = false
+}
+
+/**
+ * 加载连续浏览的下一批人物。
+ * - 通过 requestEpoch 丢弃过期请求，避免快速切换筛选时旧结果覆盖新结果。
+ * - 追加时按人物 ID 去重，防止同一页重复追加。
+ */
+const loadMoreContinuous = async () => {
+  if (continuousLoading.value || continuousFinished.value) return
+  continuousLoading.value = true
+  continuousError.value = false
+  const myEpoch = requestEpoch.value
+  const page = continuousPage.value
+  try {
+    const res = await peopleApi.getList({
+      page,
+      page_size: CONTINUOUS_PAGE_SIZE,
+      search: filters.search || undefined,
+      category: filters.category,
+    })
+    // 请求返回后若代际已变（筛选已切换），丢弃结果
+    if (myEpoch !== requestEpoch.value) return
+    const payload = res.data?.data
+    const items = payload?.items || []
+    const totalCount = payload?.total || 0
+    const existing = new Set(continuousPeople.value.map(person => person.id))
+    const fresh = items.filter(person => !existing.has(person.id))
+    continuousPeople.value = [...continuousPeople.value, ...fresh]
+    continuousTotal.value = totalCount
+    continuousPage.value = page + 1
+    // 本页返回少于每页数量，或已加载达到总数，视为加载完毕
+    if (items.length < CONTINUOUS_PAGE_SIZE || continuousPeople.value.length >= totalCount) {
+      continuousFinished.value = true
+    }
+  } catch (error: any) {
+    if (myEpoch !== requestEpoch.value) return
+    continuousError.value = true
+    ElMessage.error(error.message || '加载人物列表失败')
+  } finally {
+    if (myEpoch === requestEpoch.value) {
+      continuousLoading.value = false
+    }
+  }
+}
+
+/**
+ * 进入连续浏览模式：若存在与当前筛选匹配的快照（从详情页返回），恢复已加载列表与滚动位置；
+ * 否则从第一页开始加载。
+ */
+const initContinuousMode = async () => {
+  if (isContinuousSnapshotUsable(filters.search, filters.category, CONTINUOUS_PAGE_SIZE)) {
+    const snap = getContinuousSnapshot()
+    continuousPeople.value = [...snap.items]
+    continuousPage.value = snap.nextPage
+    continuousTotal.value = snap.total
+    continuousFinished.value = snap.finished
+    continuousError.value = false
+    continuousLoading.value = false
+    // 恢复滚动位置（等待 DOM 渲染完成）
+    await nextTick()
+    const container = getScrollContainer()
+    if (container && snap.scrollTop > 0) {
+      container.scrollTop = snap.scrollTop
+    }
+    // 若恢复后仍未加载完且哨兵可见，继续加载
+    setupScrollObserver()
+    return
+  }
+  clearContinuousSnapshot()
+  resetContinuousList()
+  await loadMoreContinuous()
+  setupScrollObserver()
+}
+
+const handleModeChange = async (mode: BrowseMode | string) => {
+  const nextMode = mode as BrowseMode
+  // 切换模式前先拆除旧的触底监听，避免悬挂在已卸载的哨兵节点上
+  teardownScrollObserver()
+  saveBrowseMode(nextMode)
+  avatarFailed.value = new Set()
+  if (nextMode === 'continuous') {
+    await initContinuousMode()
+  } else {
+    // 切回翻页模式：加载当前分页
+    await loadPeople()
+  }
+}
+
+/**
+ * 连续浏览模式下，触底哨兵进入视口时加载下一批。
+ */
+const setupScrollObserver = () => {
+  teardownScrollObserver()
+  if (browseMode.value !== 'continuous') return
+  const container = getScrollContainer()
+  if (!container || !sentinelRef.value) {
+    // 容器或哨兵尚未就绪，稍后重试
+    return
+  }
+  scrollObserver = new IntersectionObserver(
+    entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          void loadMoreContinuous()
+        }
+      }
+    },
+    { root: container, rootMargin: '200px' },
+  )
+  scrollObserver.observe(sentinelRef.value)
+}
+
+const teardownScrollObserver = () => {
+  if (scrollObserver) {
+    scrollObserver.disconnect()
+    scrollObserver = null
+  }
+}
+
 const goToDetail = (personId: number) => {
+  // 连续浏览模式：离开前保存已加载列表与滚动位置，便于返回恢复
+  if (browseMode.value === 'continuous') {
+    const container = getScrollContainer()
+    saveContinuousSnapshot({
+      items: continuousPeople.value,
+      nextPage: continuousPage.value,
+      total: continuousTotal.value,
+      finished: continuousFinished.value,
+      search: filters.search,
+      category: filters.category,
+      pageSize: CONTINUOUS_PAGE_SIZE,
+      scrollTop: container?.scrollTop ?? 0,
+    })
+  }
   router.push({
     path: `/people/${personId}`,
     query: { ...route.query }
@@ -633,6 +901,12 @@ const goToDetail = (personId: number) => {
 const refreshCurrentTab = async () => {
   if (activeTab.value === 'task') {
     await loadTaskData()
+    return
+  }
+  avatarFailed.value = new Set()
+  if (browseMode.value === 'continuous') {
+    resetContinuousList()
+    await Promise.all([loadMoreContinuous(), loadMergeSuggestions()])
     return
   }
   await Promise.all([loadPeople(), loadMergeSuggestions()])
@@ -715,7 +989,7 @@ const openMergeSuggestionReview = async (id: number) => {
 const reloadMergeSuggestionReviewState = async (shouldCloseOnComplete = false) => {
   // 合并建议审核弹窗仅在人物列表 Tab 打开；未进入后台任务 Tab 时不触发后台任务请求，
   // 待用户切回后台任务 Tab 时由 watch 重新加载
-  const tasks: Promise<unknown>[] = [loadMergeSuggestions()]
+  const tasks: Promise<unknown>[] = [loadMergeSuggestions(), refreshPeopleForCurrentMode()]
   if (activeTab.value === 'task') {
     tasks.push(loadTaskData())
   }
@@ -733,6 +1007,20 @@ const reloadMergeSuggestionReviewState = async (shouldCloseOnComplete = false) =
   if (!currentMergeSuggestion.value || !currentMergeSuggestion.value.items?.length) {
     mergeSuggestionDialogVisible.value = false
   }
+}
+
+/**
+ * 合并/审核后刷新人物列表：翻页模式重新加载当前页，连续浏览模式重置并从第一页加载。
+ * 连续浏览下若已保存快照（从详情返回场景）一并清除，避免恢复过期数据。
+ */
+const refreshPeopleForCurrentMode = async () => {
+  if (browseMode.value === 'continuous') {
+    clearContinuousSnapshot()
+    resetContinuousList()
+    await loadMoreContinuous()
+    return
+  }
+  await loadPeople()
 }
 
 const handleExcludeMergeSuggestion = async (candidateIds: number[]) => {
@@ -825,15 +1113,32 @@ watch(mergeSuggestionDialogVisible, (visible) => {
 
 watch(activeTab, async (tab) => {
   if (tab === 'task') {
+    teardownScrollObserver()
     await loadTaskData()
     return
   }
   await loadMergeSuggestions()
+  // 回到人物列表 Tab 时，若处于连续浏览模式，重新挂载触底监听
+  await nextTick()
+  if (browseMode.value === 'continuous') {
+    setupScrollObserver()
+  }
+})
+
+// 连续浏览模式下哨兵节点变化时重新挂载监听
+watch(sentinelRef, () => {
+  if (browseMode.value === 'continuous') {
+    setupScrollObserver()
+  }
 })
 
 onMounted(async () => {
-  // 首次仅加载人物列表与合并建议；后台任务数据改为进入“后台任务” Tab 后按需懒加载
-  await Promise.all([loadPeople(), loadMergeSuggestions()])
+  // 首次加载人物列表与合并建议；后台任务数据改为进入“后台任务” Tab 后按需懒加载
+  if (browseMode.value === 'continuous') {
+    await Promise.all([initContinuousMode(), loadMergeSuggestions()])
+  } else {
+    await Promise.all([loadPeople(), loadMergeSuggestions()])
+  }
   taskTimer = window.setInterval(() => {
     // 仅在后台任务 Tab 时轮询后台任务数据；切回人物列表后不再产生后台任务请求
     if (activeTab.value === 'task') {
@@ -848,6 +1153,7 @@ onBeforeUnmount(() => {
     clearInterval(taskTimer)
     taskTimer = null
   }
+  teardownScrollObserver()
 })
 </script>
 
@@ -903,43 +1209,65 @@ onBeforeUnmount(() => {
   min-height: 240px;
 }
 
-.people-card-grid,
-.merge-suggestion-grid {
+.people-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
+  /* 宽屏桌面约 5–7 人/行；auto-fill + minmax 自适应密度 */
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px;
 }
 
 .person-card {
   width: 100%;
   border: 1px solid var(--color-border);
-  border-radius: 14px;
-  padding: 14px;
+  border-radius: 16px;
+  padding: 10px;
   background: #fff;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
   text-align: left;
   cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .person-card:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
   border-color: rgba(212, 107, 8, 0.28);
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.07);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
 }
 
+/* 1:1 圆角方形大头像，懒加载，失败显示兜底 */
 .person-card-avatar {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--color-bg-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+}
+
+.person-card-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.person-card-avatar-fallback {
+  font-size: 30px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 .person-card-body {
   min-width: 0;
-  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  padding: 0 2px 2px;
 }
 
 .person-card-title-row,
@@ -948,7 +1276,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 
 .person-card-name,
@@ -963,17 +1291,37 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.person-card-id {
+/* 类别标签：低饱和度配色，完整不省略 */
+.person-card-category {
   flex-shrink: 0;
-  padding: 1px 6px;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: var(--color-bg-soft);
-  color: var(--color-text-secondary);
   font-size: 11px;
   font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
-.person-card-meta,
+.person-card-category.is-family {
+  background: rgba(245, 108, 108, 0.12);
+  color: #c45656;
+}
+
+.person-card-category.is-friend {
+  background: rgba(103, 194, 58, 0.14);
+  color: #5a9a3a;
+}
+
+.person-card-category.is-acquaintance {
+  background: rgba(230, 162, 60, 0.14);
+  color: #b8821f;
+}
+
+.person-card-category.is-stranger {
+  background: rgba(144, 147, 153, 0.14);
+  color: #8a8d93;
+}
+
 .merge-suggestion-meta,
 .merge-suggestion-subtitle {
   display: flex;
@@ -989,6 +1337,32 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
 }
 
+.mode-toggle {
+  flex-shrink: 0;
+}
+
+.continuous-sentinel {
+  height: 1px;
+  width: 100%;
+}
+
+.continuous-status {
+  margin-top: 16px;
+  padding: 12px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.continuous-status.continuous-error {
+  color: #f56c6c;
+}
+
+.retry-link {
+  padding: 0 4px;
+  vertical-align: baseline;
+}
+
 .pagination-wrap {
   display: flex;
   justify-content: flex-end;
@@ -997,6 +1371,12 @@ onBeforeUnmount(() => {
 
 .merge-suggestion-list {
   min-height: 120px;
+}
+
+.merge-suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
 }
 
 .merge-suggestion-card {
@@ -1167,13 +1547,23 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1200px) {
-  .people-card-grid,
+  /* 普通桌面 / 平板：约 3–4 人/行 */
+  .people-card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
   .merge-suggestion-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .merge-task-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 992px) {
+  .people-card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1188,6 +1578,7 @@ onBeforeUnmount(() => {
     padding-right: 18px;
   }
 
+  /* 手机：2 人/行 */
   .people-card-grid,
   .merge-suggestion-grid,
   .merge-task-stats {
@@ -1203,7 +1594,7 @@ onBeforeUnmount(() => {
   .people-card-grid,
   .merge-suggestion-grid,
   .merge-task-stats {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .header-filter-input {
@@ -1213,6 +1604,11 @@ onBeforeUnmount(() => {
   .header-filter-select {
     flex: 1 1 120px;
     width: auto;
+  }
+
+  /* 窄屏下筛选与模式切换允许换行，避免挤压 */
+  .people-header-filters {
+    justify-content: flex-start;
   }
 }
 </style>
