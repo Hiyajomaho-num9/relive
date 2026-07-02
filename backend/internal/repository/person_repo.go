@@ -16,18 +16,29 @@ type PersonRepository interface {
 	ListAll() ([]*model.Person, error)
 	ListByIDs(ids []uint) ([]*model.Person, error)
 	ListMergeSuggestionTargets(cursorID uint, limit int) ([]*model.Person, error) // cursor 分页，只返回 family/friend 且有脸的人物
-	ListWithAvatar() ([]*model.Person, error) // 只返回有头像的人物（用于合并/移动候选列表）
-	ListPeople(opts ListPeopleOptions) ([]*model.Person, int64, error) // 数据库层分页查询
+	ListWithAvatar() ([]*model.Person, error)                                     // 只返回有头像的人物（用于合并/移动候选列表）
+	ListPeople(opts ListPeopleOptions) ([]*model.Person, int64, error)            // 数据库层分页查询
 	RefreshStats(personID uint) error
 	MergeInto(targetPersonID uint, sourcePersonIDs []uint) ([]uint, error)
+	// UpdateVisibility 批量设置人物隐藏状态，单次事务更新，返回实际更新行数。
+	// 仅修改 hidden 字段，不影响分类、人脸、照片及 top_person_category。
+	UpdateVisibility(personIDs []uint, hidden bool) (int64, error)
 }
 
+// 可见性筛选值：仅显示中 / 仅已隐藏 / 全部。空值按全部处理，保持合并、移动候选等现有调用兼容。
+const (
+	PersonVisibilityVisible = "visible"
+	PersonVisibilityHidden  = "hidden"
+	PersonVisibilityAll     = "all"
+)
+
 type ListPeopleOptions struct {
-	Page      int
-	PageSize  int
-	Category  string
-	Search    string
-	HasAvatar bool
+	Page       int
+	PageSize   int
+	Category   string
+	Search     string
+	HasAvatar  bool
+	Visibility string // visible | hidden | all，缺省按 all
 }
 
 type personRepository struct {
@@ -120,6 +131,12 @@ func (r *personRepository) ListPeople(opts ListPeopleOptions) ([]*model.Person, 
 	if opts.Category != "" {
 		q = q.Where("category = ?", opts.Category)
 	}
+	switch opts.Visibility {
+	case PersonVisibilityVisible:
+		q = q.Where("hidden = ?", false)
+	case PersonVisibilityHidden:
+		q = q.Where("hidden = ?", true)
+	} // all 或空值：不附加可见性条件
 	if opts.Search != "" {
 		like := "%" + opts.Search + "%"
 		q = q.Where("LOWER(name) LIKE ? OR LOWER(category) LIKE ? OR CAST(id AS TEXT) LIKE ?", like, like, like)
@@ -163,10 +180,12 @@ func (r *personRepository) MergeInto(targetPersonID uint, sourcePersonIDs []uint
 			return gorm.ErrRecordNotFound
 		}
 
-		allPersonIDs := append([]uint{targetPersonID}, sourceIDs...)
+		// 仅收集来源人物涉及的照片 ID：合并只会改变来源人物人脸的归属，
+		// 仅含目标人物且人脸归属未变的照片无需重算。Distinct 自带去重，
+		// 多个来源人物或目标与来源出现在同一照片时不会重复。
 		if err := tx.Model(&model.Face{}).
 			Distinct("photo_id").
-			Where("person_id IN ?", allPersonIDs).
+			Where("person_id IN ?", sourceIDs).
 			Order("photo_id ASC").
 			Pluck("photo_id", &affectedPhotoIDs).Error; err != nil {
 			return err
@@ -200,6 +219,41 @@ func (r *personRepository) MergeInto(targetPersonID uint, sourcePersonIDs []uint
 	}
 
 	return affectedPhotoIDs, nil
+}
+
+// UpdateVisibility 批量设置人物隐藏状态。
+// 单次事务内按 ID 分块更新，仅写入 hidden 字段；返回受影响行数。
+// 不存在的 ID 不会报错，仅不计入更新行数。
+func (r *personRepository) UpdateVisibility(personIDs []uint, hidden bool) (int64, error) {
+	if len(personIDs) == 0 {
+		return 0, nil
+	}
+
+	// 去重
+	seen := make(map[uint]struct{}, len(personIDs))
+	uniqueIDs := make([]uint, 0, len(personIDs))
+	for _, id := range personIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+
+	var total int64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		for _, chunk := range chunkIDs(uniqueIDs) {
+			res := tx.Model(&model.Person{}).
+				Where("id IN ?", chunk).
+				Update("hidden", hidden)
+			if res.Error != nil {
+				return res.Error
+			}
+			total += res.RowsAffected
+		}
+		return nil
+	})
+	return total, err
 }
 
 func refreshPersonStats(tx *gorm.DB, personID uint) error {

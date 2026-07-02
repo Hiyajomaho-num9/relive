@@ -45,7 +45,7 @@ func newAutoScanTestService(t *testing.T, rootPath string) (*photoService, Confi
 	cfg.Photos.SupportedFormats = []string{".jpg", ".jpeg", ".png", ".heic"}
 	cfg.Photos.ThumbnailPath = filepath.Join(rootPath, ".thumbnails")
 	cfg.Performance.MaxScanWorkers = 1
-	service := NewPhotoService(photoRepo, nil, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	service := NewPhotoService(photoRepo, nil, db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
 	return service, configService
 }
 
@@ -513,13 +513,33 @@ func ptrTime(value time.Time) *time.Time {
 
 // --- Pure-logic tests (no filesystem) ---
 
+// newPhotoServiceForList 构造带 configService 的 photoService，用于列表/计数缓存测试。
+func newPhotoServiceForList(t *testing.T) (*photoService, repository.PhotoRepository) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.PhotoTagStats{}, &model.ScanJob{}, &model.AppConfig{}))
+	t.Cleanup(func() {
+		sqlDB, _ := db.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+	photoRepo := repository.NewPhotoRepository(db)
+	configService := NewConfigService(repository.NewConfigRepository(db))
+	scanJobRepo := repository.NewScanJobRepository(db)
+	cfg := &config.Config{Photos: config.PhotosConfig{ThumbnailPath: t.TempDir()}}
+	svc := NewPhotoService(photoRepo, nil, db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	return svc, photoRepo
+}
+
 func newPhotoServicePure(t *testing.T) (PhotoService, repository.PhotoRepository, repository.PhotoTagRepository) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
-	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.ScanJob{}, &model.AppConfig{}))
+	require.NoError(t, db.AutoMigrate(&model.Photo{}, &model.PhotoTag{}, &model.PhotoTagStats{}, &model.ScanJob{}, &model.AppConfig{}))
 	t.Cleanup(func() {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
@@ -532,7 +552,7 @@ func newPhotoServicePure(t *testing.T) (PhotoService, repository.PhotoRepository
 	cfg := &config.Config{
 		Photos: config.PhotosConfig{ThumbnailPath: t.TempDir()},
 	}
-	svc := NewPhotoService(photoRepo, photoTagRepo, scanJobRepo, cfg, nil, nil, nil, nil)
+	svc := NewPhotoService(photoRepo, photoTagRepo, db, scanJobRepo, cfg, nil, nil, nil, nil)
 	return svc, photoRepo, photoTagRepo
 }
 
@@ -673,6 +693,49 @@ func TestPhotoService_DeletePhotosByPathPrefix(t *testing.T) {
 	assert.Equal(t, int64(1), total)
 }
 
+// TestPhotoService_DeleteCleansTagStats 验证删除照片时同步清理 photo_tags 与统计表。
+func TestPhotoService_DeleteCleansTagStats(t *testing.T) {
+	svc, repo, tagRepo := newPhotoServicePure(t)
+	repo.Create(&model.Photo{FilePath: "/photos/a.jpg", FileHash: "h1"})
+	repo.Create(&model.Photo{FilePath: "/photos/b.jpg", FileHash: "h2"})
+	tagRepo.SyncTags(1, "nature,sky")
+	tagRepo.SyncTags(2, "nature,city")
+	// nature=2, sky=1, city=1
+
+	_, err := svc.DeletePhotosByPathPrefix("/photos/")
+	require.NoError(t, err)
+
+	tags, total, err := svc.GetTags("", 50)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+	assert.Empty(t, tags)
+
+	// photo_tags 明细也应清空（无孤儿）
+	var photoTagCount int64
+	require.NoError(t, svc.(*photoService).db.Table("photo_tags").Count(&photoTagCount).Error)
+	assert.Equal(t, int64(0), photoTagCount)
+}
+
+// TestPhotoService_RebuildTagStats 验证重建方法修复漂移。
+func TestPhotoService_RebuildTagStats(t *testing.T) {
+	svc, repo, tagRepo := newPhotoServicePure(t)
+	repo.Create(&model.Photo{FilePath: "/a.jpg", FileHash: "h1"})
+	tagRepo.SyncTags(1, "nature,sky")
+
+	// 人为破坏统计
+	ps := svc.(*photoService)
+	require.NoError(t, ps.db.Exec(`UPDATE photo_tag_stats SET photo_count = 999`).Error)
+
+	require.NoError(t, svc.RebuildTagStats())
+
+	tags, _, err := svc.GetTags("", 50)
+	require.NoError(t, err)
+	for _, tc := range tags {
+		assert.Equal(t, 1, tc.Count)
+	}
+}
+
+
 func TestPhotoService_GetPhotosByPathPrefix(t *testing.T) {
 	svc, repo, _ := newPhotoServicePure(t)
 	repo.Create(&model.Photo{FilePath: "/photos/a.jpg", FileHash: "h1"})
@@ -697,4 +760,68 @@ func TestPhotoService_CountPhotosByPathPrefix(t *testing.T) {
 func TestPhotoService_GetScanTask_NilWhenNoActive(t *testing.T) {
 	svc, _, _ := newPhotoServicePure(t)
 	assert.Nil(t, svc.GetScanTask())
+}
+
+// TestPhotoService_GetPhotosSummary_NoTotal 验证 NoTotal=true 时跳过 COUNT、total 恒为 0。
+func TestPhotoService_GetPhotosSummary_NoTotal(t *testing.T) {
+	svc, repo := newPhotoServiceForList(t)
+	for i := 0; i < 5; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath: fmt.Sprintf("/p%02d.jpg", i),
+			FileHash: fmt.Sprintf("h%02d", i),
+		}))
+	}
+
+	summaries, total, err := svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10, NoTotal: true})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total, "NoTotal should skip COUNT")
+	assert.Len(t, summaries, 5)
+}
+
+// TestPhotoService_GetPhotosSummary_FilteredCountCache 验证筛选计数缓存的命中与失效。
+func TestPhotoService_GetPhotosSummary_FilteredCountCache(t *testing.T) {
+	svc, repo := newPhotoServiceForList(t)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath: fmt.Sprintf("/p%02d.jpg", i),
+			FileHash: fmt.Sprintf("h%02d", i),
+		}))
+	}
+
+	// 首次查询：total=3
+	_, total, err := svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	// 直接写入一张照片（绕过服务层失效逻辑）
+	require.NoError(t, repo.Create(&model.Photo{FilePath: "/p99.jpg", FileHash: "h99"}))
+
+	// 缓存未失效：仍返回旧的 3
+	_, total, err = svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total, "cached total should be stale until invalidated")
+
+	// 失效后：重新查询得到 4
+	svc.invalidateFilteredCountCache()
+	_, total, err = svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), total)
+}
+
+// TestPhotoService_GetPhotosSummary_FilteredCountCache_DifferentFilters 验证不同筛选条件使用不同缓存键。
+func TestPhotoService_GetPhotosSummary_FilteredCountCache_DifferentFilters(t *testing.T) {
+	svc, repo := newPhotoServiceForList(t)
+	now := time.Now()
+	require.NoError(t, repo.Create(&model.Photo{FilePath: "/a.jpg", FileHash: "h1", AIAnalyzed: true, AnalyzedAt: &now}))
+	require.NoError(t, repo.Create(&model.Photo{FilePath: "/b.jpg", FileHash: "h2", AIAnalyzed: false}))
+
+	analyzed := true
+	_, totalAnalyzed, err := svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10, Analyzed: &analyzed})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), totalAnalyzed)
+
+	// 不同筛选条件不应命中彼此的缓存
+	_, totalAll, err := svc.GetPhotosSummary(&model.GetPhotosRequest{Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), totalAll)
 }

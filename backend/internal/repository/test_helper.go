@@ -20,6 +20,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	err = db.AutoMigrate(
 		&model.Photo{},
 		&model.PhotoTag{},
+		&model.PhotoTagStats{},
 		&model.Person{},
 		&model.Face{},
 		&model.CannotLinkConstraint{},

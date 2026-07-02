@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/davidhoo/relive/pkg/config"
 	"github.com/davidhoo/relive/pkg/database"
 	"github.com/davidhoo/relive/pkg/logger"
+	"gorm.io/gorm"
 )
 
 // PhotoService 照片服务接口
@@ -44,6 +46,7 @@ type PhotoService interface {
 	// 分类和标签
 	GetCategories() ([]string, error)
 	GetTags(query string, limit int) ([]model.TagWithCount, int64, error)
+	RebuildTagStats() error
 
 	// 地理编码
 	GeocodePhotoIfNeeded(photo *model.Photo) error
@@ -84,6 +87,7 @@ type PhotoService interface {
 type photoService struct {
 	repo                   repository.PhotoRepository
 	photoTagRepo           repository.PhotoTagRepository
+	db                     *gorm.DB
 	scanJobRepo            repository.ScanJobRepository
 	config                 *config.Config
 	configService          ConfigService
@@ -104,6 +108,19 @@ type photoService struct {
 	enabledPathsCache     []string
 	enabledPathsCacheTime time.Time
 	enabledPathsCacheMu   sync.RWMutex
+
+	// 筛选条件计数缓存（照片管理页分页总数，按筛选条件短期缓存）
+	filteredCountCache   map[string]filteredCountEntry
+	filteredCountCacheMu sync.RWMutex
+}
+
+// filteredCountCacheTTL 筛选条件计数缓存存活时间。
+const filteredCountCacheTTL = 10 * time.Second
+
+// filteredCountEntry 筛选条件计数缓存条目。
+type filteredCountEntry struct {
+	count int64
+	at    time.Time
 }
 
 func (s *photoService) SetPeopleService(peopleService PeopleService) {
@@ -111,21 +128,23 @@ func (s *photoService) SetPeopleService(peopleService PeopleService) {
 }
 
 // NewPhotoService 创建照片服务
-func NewPhotoService(repo repository.PhotoRepository, photoTagRepo repository.PhotoTagRepository, scanJobRepo repository.ScanJobRepository, cfg *config.Config, configService ConfigService, geocodeService GeocodeService, thumbnailService ThumbnailService, geocodeTaskService GeocodeTaskService) PhotoService {
+func NewPhotoService(repo repository.PhotoRepository, photoTagRepo repository.PhotoTagRepository, db *gorm.DB, scanJobRepo repository.ScanJobRepository, cfg *config.Config, configService ConfigService, geocodeService GeocodeService, thumbnailService ThumbnailService, geocodeTaskService GeocodeTaskService) PhotoService {
 	// 初始化缩略图生成器（1024px，兼顾展示和 AI 理解）
 	thumbnailGenerator := util.NewThumbnailGenerator(1024, 1024, 90, cfg.Photos.ThumbnailPath)
 
 	service := &photoService{
-		repo:               repo,
-		photoTagRepo:       photoTagRepo,
-		scanJobRepo:        scanJobRepo,
-		config:             cfg,
-		configService:      configService,
-		geocodeService:     geocodeService,
-		thumbnailGenerator: thumbnailGenerator,
-		thumbnailService:   thumbnailService,
-		geocodeTaskService: geocodeTaskService,
-		writeQueue:         database.GetWriteQueue(),
+		repo:                 repo,
+		photoTagRepo:         photoTagRepo,
+		db:                   db,
+		scanJobRepo:          scanJobRepo,
+		config:               cfg,
+		configService:        configService,
+		geocodeService:       geocodeService,
+		thumbnailGenerator:   thumbnailGenerator,
+		thumbnailService:     thumbnailService,
+		geocodeTaskService:   geocodeTaskService,
+		writeQueue:           database.GetWriteQueue(),
+		filteredCountCache:   make(map[string]filteredCountEntry),
 	}
 	service.processPhotoFunc = service.processPhoto
 
@@ -204,11 +223,25 @@ func (s *photoService) GetPhotosSummary(req *model.GetPhotosRequest) ([]*model.P
 		enabledPaths = nil
 	}
 
-	summaries, total, err := s.repo.ListSummaries(req.Page, req.PageSize, req.Analyzed, req.HasThumbnail, req.HasGPS, req.Location, req.Search, req.Category, req.Tag, req.SortBy, req.SortDesc, enabledPaths, req.Status)
+	// 列表查询始终不带总数（withTotal=false），避免 COUNT(*) OVER() 全量物化。
+	// 总数按需通过独立 COUNT 查询 + 筛选条件缓存获取。
+	summaries, _, err := s.repo.ListSummaries(req.Page, req.PageSize, req.Analyzed, req.HasThumbnail, req.HasGPS, req.Location, req.Search, req.Category, req.Tag, req.SortBy, req.SortDesc, enabledPaths, req.Status, false)
 	if err != nil {
 		return nil, 0, err
 	}
 	s.enrichPhotoSummariesTags(summaries)
+
+	// Dashboard 等无需总数的场景直接返回，跳过 COUNT 查询。
+	if req.NoTotal {
+		return summaries, 0, nil
+	}
+
+	total, err := s.getCachedFilteredCount(req, enabledPaths)
+	if err != nil {
+		// 总数查询失败不阻塞列表展示
+		logger.Warnf("Failed to get filtered count: %v", err)
+		return summaries, 0, nil
+	}
 	return summaries, total, nil
 }
 
@@ -307,7 +340,7 @@ func (s *photoService) DeletePhotosByPathPrefix(pathPrefix string) (int64, error
 	count := int64(0)
 	for _, photo := range photos {
 		if err := s.executeWrite(func() error {
-			return s.repo.Delete(photo.ID)
+			return s.deletePhotoAndTags(photo.ID)
 		}); err != nil {
 			logger.Warnf("Failed to delete photo %d: %v", photo.ID, err)
 			continue
@@ -317,6 +350,35 @@ func (s *photoService) DeletePhotosByPathPrefix(pathPrefix string) (int64, error
 
 	logger.Infof("Deleted %d photos with path prefix: %s", count, pathPrefix)
 	return count, nil
+}
+
+// deletePhotoAndTags 删除照片及其标签与统计，尽量在同一事务内完成以保证一致性。
+// 当 db 不可用时退化为顺序删除（标签优先，避免统计漂移）。
+func (s *photoService) deletePhotoAndTags(photoID uint) error {
+	if s.db != nil {
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if s.photoTagRepo != nil {
+				if err := s.photoTagRepo.DeleteTagsByPhotoIDTx(tx, photoID); err != nil {
+					return err
+				}
+			}
+			return s.repo.DeleteTx(tx, photoID)
+		})
+	}
+	if s.photoTagRepo != nil {
+		if err := s.photoTagRepo.DeleteTagsByPhotoID(photoID); err != nil {
+			return err
+		}
+	}
+	return s.repo.Delete(photoID)
+}
+
+// RebuildTagStats 全量重建标签统计表，用于修复历史数据或异常漂移。可重复执行。
+func (s *photoService) RebuildTagStats() error {
+	if s.db == nil {
+		return fmt.Errorf("database not available")
+	}
+	return database.RebuildPhotoTagStats(s.db)
 }
 
 // GetPhotoIDsByPathPrefix 根据路径前缀获取照片ID列表
@@ -378,6 +440,11 @@ func (s *photoService) BatchUpdateStatus(req *model.BatchUpdateStatusRequest) (i
 		return err
 	}); err != nil {
 		return 0, err
+	}
+	// 状态变化立即改变活跃照片计数，失效相关缓存
+	if count > 0 {
+		s.invalidateFilteredCountCache()
+		invalidatePhotoStatsCache()
 	}
 	return count, nil
 }
@@ -479,6 +546,74 @@ func (s *photoService) InvalidateScanPathsCache() {
 	s.enabledPathsCache = nil
 	s.enabledPathsCacheTime = time.Time{}
 	s.enabledPathsCacheMu.Unlock()
+
+	// 扫描路径变化会改变可见照片集合，筛选条件计数一并失效
+	s.invalidateFilteredCountCache()
+}
+
+// getCachedFilteredCount 按筛选条件获取照片总数（带短期缓存）。
+// 照片管理页翻页时同一筛选条件复用缓存的总数，避免每次都执行 COUNT 全表扫描。
+func (s *photoService) getCachedFilteredCount(req *model.GetPhotosRequest, enabledPaths []string) (int64, error) {
+	key := buildFilteredCountKey(req, enabledPaths)
+
+	s.filteredCountCacheMu.RLock()
+	if entry, ok := s.filteredCountCache[key]; ok && time.Since(entry.at) < filteredCountCacheTTL {
+		s.filteredCountCacheMu.RUnlock()
+		return entry.count, nil
+	}
+	s.filteredCountCacheMu.RUnlock()
+
+	count, err := s.repo.CountWithFilters(req.Analyzed, req.HasThumbnail, req.HasGPS, req.Location, req.Search, req.Category, req.Tag, enabledPaths, req.Status)
+	if err != nil {
+		return 0, err
+	}
+
+	s.filteredCountCacheMu.Lock()
+	s.filteredCountCache[key] = filteredCountEntry{count: count, at: time.Now()}
+	s.filteredCountCacheMu.Unlock()
+	return count, nil
+}
+
+// invalidateFilteredCountCache 清除筛选条件计数缓存。
+func (s *photoService) invalidateFilteredCountCache() {
+	s.filteredCountCacheMu.Lock()
+	s.filteredCountCache = make(map[string]filteredCountEntry)
+	s.filteredCountCacheMu.Unlock()
+}
+
+// buildFilteredCountKey 根据筛选条件构建缓存键。enabledPaths 一并纳入，避免路径变化后复用旧计数。
+func buildFilteredCountKey(req *model.GetPhotosRequest, enabledPaths []string) string {
+	var b strings.Builder
+	b.WriteString("a=")
+	if req.Analyzed != nil {
+		b.WriteString(strconv.FormatBool(*req.Analyzed))
+	}
+	b.WriteString("|t=")
+	if req.HasThumbnail != nil {
+		b.WriteString(strconv.FormatBool(*req.HasThumbnail))
+	}
+	b.WriteString("|g=")
+	if req.HasGPS != nil {
+		b.WriteString(strconv.FormatBool(*req.HasGPS))
+	}
+	b.WriteString("|loc=")
+	b.WriteString(req.Location)
+	b.WriteString("|s=")
+	b.WriteString(req.Search)
+	b.WriteString("|cat=")
+	b.WriteString(req.Category)
+	b.WriteString("|tag=")
+	b.WriteString(req.Tag)
+	b.WriteString("|st=")
+	b.WriteString(req.Status)
+	b.WriteString("|p=")
+	for i, p := range enabledPaths {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 // loadEnabledPathsFromDB 从数据库加载启用的扫描路径

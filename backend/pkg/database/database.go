@@ -181,6 +181,7 @@ func AutoMigrate(db *gorm.DB) error {
 	models := []interface{}{
 		&model.Photo{},
 		&model.PhotoTag{},
+		&model.PhotoTagStats{},
 		&model.Person{},
 		&model.Face{},
 		&model.PeopleJob{},
@@ -234,6 +235,10 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
+	if err := migratePhotoTagStatsTable(db); err != nil {
+		log.Printf("[database] warning: photo_tag_stats migration failed: %v", err)
+	}
+
 	if err := migrateFTS5Table(db); err != nil {
 		// FTS5 迁移失败不阻塞启动，降级为 LIKE 搜索
 		log.Printf("[database] warning: FTS5 migration failed: %v, falling back to LIKE search", err)
@@ -265,6 +270,10 @@ func AutoMigrate(db *gorm.DB) error {
 
 	if err := migrateMergeSuggestionIndex(db); err != nil {
 		log.Printf("[database] warning: merge suggestion index migration failed: %v", err)
+	}
+
+	if err := migratePeopleJobsCleanupIndex(db); err != nil {
+		log.Printf("[database] warning: people jobs cleanup index migration failed: %v", err)
 	}
 
 	return nil
@@ -353,6 +362,58 @@ func migratePhotoTagsTable(db *gorm.DB) error {
 	// 标记已迁移
 	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
 	return nil
+}
+
+// migratePhotoTagStatsTable 从 photo_tags 全量聚合生成 photo_tag_stats 预聚合统计表。
+// 幂等：已迁移则跳过；ON CONFLICT 保证重复执行也安全。
+func migratePhotoTagStatsTable(db *gorm.DB) error {
+	const migrationKey = "migration.photo_tag_stats_v1"
+
+	var cfg model.AppConfig
+	if err := db.Where("key = ?", migrationKey).First(&cfg).Error; err == nil {
+		return nil // 已迁移
+	}
+
+	log.Printf("[database] building photo_tag_stats from photo_tags...")
+
+	// 全量聚合：每标签一行，photo_count = COUNT(*)
+	if err := db.Exec(
+		`INSERT INTO photo_tag_stats(tag, photo_count, updated_at)
+		 SELECT tag, COUNT(*), ?
+		   FROM photo_tags
+		  GROUP BY tag
+		 ON CONFLICT(tag) DO UPDATE SET photo_count = excluded.photo_count, updated_at = excluded.updated_at`,
+		time.Now(),
+	).Error; err != nil {
+		return err
+	}
+
+	// 清理可能的零计数残留
+	if err := db.Exec(`DELETE FROM photo_tag_stats WHERE photo_count <= 0`).Error; err != nil {
+		return err
+	}
+
+	log.Printf("[database] photo_tag_stats built")
+
+	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
+	return nil
+}
+
+// RebuildPhotoTagStats 全量重建标签统计表，用于修复历史数据或异常漂移。可重复执行。
+// 在单一事务内清空并重新聚合，保证与 photo_tags 完全一致。
+func RebuildPhotoTagStats(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`DELETE FROM photo_tag_stats`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(
+			`INSERT INTO photo_tag_stats(tag, photo_count, updated_at)
+			 SELECT tag, COUNT(*), ?
+			   FROM photo_tags
+			  GROUP BY tag`,
+			time.Now(),
+		).Error
+	})
 }
 
 // migrateFTS5Table 创建 FTS5 全文搜索虚拟表和同步触发器
@@ -591,6 +652,29 @@ func migrateMergeSuggestionIndex(db *gorm.DB) error {
 	}
 
 	log.Printf("[database] merge suggestion targets index created")
+	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
+	return nil
+}
+
+// migratePeopleJobsCleanupIndex 创建 (status, updated_at) 复合索引，供终态任务清理查询使用，
+// 避免扫描全部 people_jobs 记录。GORM tag 也会在新库上创建同名索引，这里用 app_config 标记
+// 保证已存在的线上库也能补建。
+func migratePeopleJobsCleanupIndex(db *gorm.DB) error {
+	const migrationKey = "migration.people_jobs_cleanup_index_v1"
+
+	var cfg model.AppConfig
+	if err := db.Where("key = ?", migrationKey).First(&cfg).Error; err == nil {
+		return nil
+	}
+
+	log.Printf("[database] creating people_jobs cleanup index (status, updated_at)...")
+
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_people_jobs_cleanup
+		ON people_jobs(status, updated_at)`).Error; err != nil {
+		return fmt.Errorf("create people_jobs cleanup index: %w", err)
+	}
+
+	log.Printf("[database] people_jobs cleanup index created")
 	db.Create(&model.AppConfig{Key: migrationKey, Value: "done"})
 	return nil
 }

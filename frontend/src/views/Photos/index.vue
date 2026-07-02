@@ -634,6 +634,7 @@ import { peopleApi } from '@/api/people'
 import { configApi, type ScanPathConfig, type AutoScanConfig } from '@/api/config'
 import type { Photo, TagInfo } from '@/types/photo'
 import { usePhotoStore } from '@/stores/photo'
+import { shouldLoadScanPathDerivedStatus } from './scanPathStatsHelpers'
 import { v4 as uuidv4 } from 'uuid'
 
 const router = useRouter()
@@ -737,7 +738,7 @@ const handleExcludeSelected = async () => {
     selectedPhotos.value = new Set()
     loadPhotos()
     loadPhotoCounts()
-    loadPathDerivedStatus()
+    void refreshPathDerivedStatusWhenVisible()
   } catch (error: any) {
     ElMessage.error(error.message || '移除失败')
   } finally {
@@ -754,7 +755,7 @@ const handleRestoreSelected = async () => {
     selectedPhotos.value = new Set()
     loadPhotos()
     loadPhotoCounts()
-    loadPathDerivedStatus()
+    void refreshPathDerivedStatusWhenVisible()
   } catch (error: any) {
     ElMessage.error(error.message || '恢复失败')
   } finally {
@@ -798,7 +799,7 @@ const handleBatchLocationConfirm = async (coords: { latitude: number; longitude:
   }
   selectedPhotos.value = new Set()
   loadPhotos()
-  loadPathDerivedStatus()
+  void refreshPathDerivedStatusWhenVisible()
 }
 
 const excludedCount = computed(() => photoStore.photoCounts.excluded)
@@ -857,6 +858,7 @@ const loadPathPhotoCounts = async () => {
 }
 
 let pathDerivedStatusLoading = false
+const pathDerivedStatusLoaded = ref(false)
 const loadPathDerivedStatus = async () => {
   if (pathDerivedStatusLoading) return
   pathDerivedStatusLoading = true
@@ -869,11 +871,27 @@ const loadPathDerivedStatus = async () => {
     const paths = scanPaths.value.map(p => p.path)
     const res = await photoApi.countDerivedStatusByPaths({ paths })
     pathDerivedStatus.value = res.data?.data?.stats || {}
+    const counts: Record<string, number> = {}
+    for (const [path, status] of Object.entries(pathDerivedStatus.value)) {
+      counts[path] = status.photo_total || 0
+    }
+    pathPhotoCounts.value = counts
+    pathDerivedStatusLoaded.value = true
   } catch (error) {
     console.error('Failed to load path derived status:', error)
   } finally {
     pathDerivedStatusLoading = false
   }
+}
+
+const loadPathDerivedStatusWhenVisible = async () => {
+  if (!shouldLoadScanPathDerivedStatus(scanPathsCollapsed.value, pathDerivedStatusLoaded.value)) return
+  await loadPathDerivedStatus()
+}
+
+const refreshPathDerivedStatusWhenVisible = async () => {
+  pathDerivedStatusLoaded.value = false
+  await loadPathDerivedStatusWhenVisible()
 }
 
 const getPathAnalysisDerivedState = (path: string) => {
@@ -1253,13 +1271,7 @@ const loadScanPaths = async () => {
     scanPathLoading.value = false
   }
   // 派生状态异步加载，不阻塞路径表显示
-  loadPathDerivedStatus().then(() => {
-    const counts: Record<string, number> = {}
-    for (const [path, status] of Object.entries(pathDerivedStatus.value)) {
-      counts[path] = (status as any).photo_total || 0
-    }
-    pathPhotoCounts.value = counts
-  })
+  void loadPathDerivedStatusWhenVisible()
 }
 
 // 加载分类和热门标签
@@ -1359,6 +1371,9 @@ const handleTagClick = (value: string) => {
 const toggleScanPaths = () => {
   scanPathsCollapsed.value = !scanPathsCollapsed.value
   localStorage.setItem('photos_scanPaths_collapsed', String(scanPathsCollapsed.value))
+  if (!scanPathsCollapsed.value) {
+    void loadPathDerivedStatusWhenVisible()
+  }
 }
 
 // 点击路径名称搜索
@@ -1534,7 +1549,7 @@ const startPollingScanProgress = (pathName: string) => {
           ? Math.round((task.processed_files / discovered) * 100)
           : 0
         console.log(`[${pathName}] 进度: ${percent}% (${task.processed_files}/${discovered}) status=${task.status}`)
-        await loadPathDerivedStatus()
+        await refreshPathDerivedStatusWhenVisible()
       } else {
         // 任务完成
         clearInterval(scanProgressTimer!)
@@ -1561,7 +1576,7 @@ const startPollingScanProgress = (pathName: string) => {
         photoStore.invalidateAll()
         await loadPhotos()
         await loadScanPaths()
-        await Promise.all([loadPathPhotoCounts(), loadPathDerivedStatus()])
+        await Promise.all([loadPathPhotoCounts(), refreshPathDerivedStatusWhenVisible()])
       }
     } catch (error: any) {
       console.error('查询扫描进度失败:', error)
@@ -1588,7 +1603,7 @@ const handleCleanup = async () => {
     // Reload photos to update the list
     await loadPhotos()
     // 刷新路径照片数量
-    await Promise.all([loadPathPhotoCounts(), loadPathDerivedStatus()])
+    await Promise.all([loadPathPhotoCounts(), refreshPathDerivedStatusWhenVisible()])
   } catch (error: any) {
     ElMessage.error(error.message || '清理照片失败')
   } finally {

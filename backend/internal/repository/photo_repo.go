@@ -23,6 +23,8 @@ type PhotoRepository interface {
 	Update(photo *model.Photo) error
 	UpdateFields(id uint, fields map[string]interface{}) error
 	Delete(id uint) error
+	// DeleteTx 在已有事务内删除照片（用于跨表原子删除）
+	DeleteTx(tx *gorm.DB, id uint) error
 	GetByID(id uint) (*model.Photo, error)
 	GetByFilePath(filePath string) (*model.Photo, error)
 	GetByFileHash(fileHash string) (*model.Photo, error)
@@ -31,11 +33,15 @@ type PhotoRepository interface {
 
 	// 列表查询
 	List(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.Photo, int64, error)
-	ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error)
+	ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error)
+	// CountWithFilters 按筛选条件统计照片总数（独立 COUNT 查询，供服务层缓存）
+	CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error)
+	// GetPhotoStats 一次聚合查询返回活跃照片总数、已分析数与总占用（供共享缓存使用）
+	GetPhotoStats() (total, analyzed, size int64, err error)
 	ListAll() ([]*model.Photo, error)
 	IterateActivePhotos(columns []string, batchSize int, fn func(photos []*model.Photo) error) error
 	ListByIDs(ids []uint) ([]*model.Photo, error)
-	ListPhotosByPersonID(personID uint) ([]*model.Photo, error) // 通过 JOIN 直接获取人物关联照片
+	ListPhotosByPersonID(personID uint) ([]*model.Photo, error)         // 通过 JOIN 直接获取人物关联照片
 	ListPhotoSummariesByPersonID(personID uint) ([]*model.Photo, error) // 精简列 + SQL 排序
 	ListPhotoSummariesByPersonIDPaginated(personID uint, page, pageSize int) ([]*model.Photo, int64, error)
 
@@ -93,6 +99,9 @@ type PhotoRepository interface {
 
 	// 人物系统
 	ListByFaceStatus(status string) ([]*model.Photo, error)
+	// CountActiveByFaceProcessStatuses 统计指定人脸处理状态下的活跃照片数，
+	// 供人物页面“已检测/待处理”等业务统计使用（独立于 people_jobs 任务明细）。
+	CountActiveByFaceProcessStatuses(statuses []string) (int64, error)
 
 	// 手动旋转
 	UpdateManualRotation(id uint, rotation int) error
@@ -133,6 +142,11 @@ func (r *photoRepository) UpdateFields(id uint, fields map[string]interface{}) e
 // 设计意图：排除照片使用 status=excluded（可恢复），Delete 用于真正的数据清理
 func (r *photoRepository) Delete(id uint) error {
 	return r.db.Unscoped().Delete(&model.Photo{}, "id = ?", id).Error
+}
+
+// DeleteTx 在已有事务内硬删除照片，用于与标签清理同事务原子提交
+func (r *photoRepository) DeleteTx(tx *gorm.DB, id uint) error {
+	return tx.Unscoped().Delete(&model.Photo{}, "id = ?", id).Error
 }
 
 // GetByID 根据 ID 获取照片
@@ -300,20 +314,25 @@ func (r *photoRepository) List(page, pageSize int, analyzed *bool, hasThumbnail 
 	return photos, total, nil
 }
 
-// photoSummaryWithTotal 用于 COUNT(*) OVER() 查询
-type photoSummaryWithTotal struct {
-	model.PhotoSummary
-	TotalCount int64 `gorm:"column:total_count"`
-}
-
-// ListSummaries 分页列表查询（仅返回摘要字段，单次查询含总数）
-func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error) {
+// ListSummaries 分页列表查询（仅返回摘要字段）。
+// withTotal=false 时仅执行 ORDER BY ... LIMIT（不统计总数），用于 Dashboard 最近照片等
+// 无需总数的场景，避免 COUNT(*) OVER() 造成的全量物化与临时排序。
+// withTotal=true 时使用独立的 COUNT 查询获取总数（不再使用窗口函数）。
+func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error) {
 	if enabledPaths != nil && len(enabledPaths) == 0 {
 		return []*model.PhotoSummary{}, 0, nil
 	}
 
 	query := r.db.Model(&model.Photo{})
 	query = r.applyPhotoFilters(query, analyzed, hasThumbnail, hasGPS, location, search, category, tag, enabledPaths, status)
+
+	// 需要总数时使用独立 COUNT 查询（服务层会按筛选条件缓存该结果）
+	var total int64
+	if withTotal {
+		if err := query.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+	}
 
 	sortBy = sanitizeSortBy(sortBy)
 	orderClause := sortBy
@@ -324,8 +343,8 @@ func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasT
 	}
 
 	offset := (page - 1) * pageSize
-	var results []photoSummaryWithTotal
-	if err := query.Select("id, file_path, ai_analyzed, overall_score, thumbnail_status, location, gps_latitude, gps_longitude, taken_at, width, height, updated_at, COUNT(*) OVER() as total_count").
+	var results []model.PhotoSummary
+	if err := query.Select("id, file_path, ai_analyzed, overall_score, thumbnail_status, location, gps_latitude, gps_longitude, taken_at, width, height, updated_at").
 		Order(orderClause).
 		Offset(offset).
 		Limit(pageSize).
@@ -333,16 +352,42 @@ func (r *photoRepository) ListSummaries(page, pageSize int, analyzed *bool, hasT
 		return nil, 0, err
 	}
 
-	var total int64
 	summaries := make([]*model.PhotoSummary, len(results))
 	for i := range results {
-		summaries[i] = &results[i].PhotoSummary
-		if results[i].TotalCount > 0 {
-			total = results[i].TotalCount
-		}
+		summaries[i] = &results[i]
 	}
 
 	return summaries, total, nil
+}
+
+// CountWithFilters 按筛选条件统计照片总数（独立 COUNT 查询，供服务层按筛选条件缓存）。
+func (r *photoRepository) CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error) {
+	if enabledPaths != nil && len(enabledPaths) == 0 {
+		return 0, nil
+	}
+	query := r.db.Model(&model.Photo{})
+	query = r.applyPhotoFilters(query, analyzed, hasThumbnail, hasGPS, location, search, category, tag, enabledPaths, status)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// GetPhotoStats 一次聚合查询返回活跃照片总数、已分析数与总占用（供共享缓存使用）。
+func (r *photoRepository) GetPhotoStats() (total, analyzed, size int64, err error) {
+	var stats struct {
+		Total    int64 `gorm:"column:total"`
+		Analyzed int64 `gorm:"column:analyzed"`
+		Size     int64 `gorm:"column:size"`
+	}
+	if err := r.db.Model(&model.Photo{}).
+		Where("status = ?", model.PhotoStatusActive).
+		Select("COUNT(*) as total, SUM(CASE WHEN ai_analyzed = 1 THEN 1 ELSE 0 END) as analyzed, COALESCE(SUM(file_size), 0) as size").
+		Scan(&stats).Error; err != nil {
+		return 0, 0, 0, err
+	}
+	return stats.Total, stats.Analyzed, stats.Size, nil
 }
 
 // GetAdjacent 获取指定照片在同一筛选/排序条件下的前后相邻照片 ID
@@ -790,6 +835,20 @@ func (r *photoRepository) ListByFaceStatus(status string) ([]*model.Photo, error
 	return photos, err
 }
 
+// CountActiveByFaceProcessStatuses 统计活跃照片中人脸处理状态命中 statuses 的数量。
+// 利用 idx_face_process_status 索引；空 statuses 返回 0，避免生成无条件 COUNT。
+func (r *photoRepository) CountActiveByFaceProcessStatuses(statuses []string) (int64, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err := r.db.Model(&model.Photo{}).
+		Scopes(activeScope).
+		Where("face_process_status IN ?", statuses).
+		Count(&count).Error
+	return count, err
+}
+
 // CountByPathPrefix 统计指定路径前缀的照片数量
 func (r *photoRepository) CountByPathPrefix(prefix string) (int64, error) {
 	var count int64
@@ -839,13 +898,13 @@ func (r *photoRepository) GetCategories() ([]string, error) {
 	return categories, err
 }
 
-// GetTags 获取热门标签（从 photo_tags 表查询，支持搜索和限制数量）
+// GetTags 获取热门标签（从 photo_tag_stats 预聚合表查询，支持搜索和限制数量）。
+// 统计表由 photo_tags 写入路径增量维护，避免对明细表实时 GROUP BY 全表扫描。
 func (r *photoRepository) GetTags(query string, limit int) ([]model.TagWithCount, error) {
 	var results []model.TagWithCount
-	db := r.db.Table("photo_tags").
-		Select("tag, COUNT(*) as count").
-		Group("tag").
-		Order("count DESC, tag ASC")
+	db := r.db.Table("photo_tag_stats").
+		Select("tag, photo_count as count").
+		Order("photo_count DESC, tag ASC")
 
 	if query != "" {
 		db = db.Where("tag LIKE ?", "%"+query+"%")
@@ -858,12 +917,10 @@ func (r *photoRepository) GetTags(query string, limit int) ([]model.TagWithCount
 	return results, err
 }
 
-// CountTags 统计不同标签总数
+// CountTags 统计不同标签总数（直接取统计表行数）
 func (r *photoRepository) CountTags() (int64, error) {
 	var count int64
-	err := r.db.Table("photo_tags").
-		Distinct("tag").
-		Count(&count).Error
+	err := r.db.Table("photo_tag_stats").Count(&count).Error
 	return count, err
 }
 
@@ -959,19 +1016,54 @@ func (r *photoRepository) RecomputeTopPersonCategory(photoIDs []uint) error {
 		byPhotoID[row.PhotoID] = row
 	}
 
+	// 批量更新：每条 SQL 用 CASE WHEN 一次性写入一个批次，更新次数随批次数
+	// （而非照片数）增长。每个批次参数量 = 5*N+1（face_count/top_person_category
+	// 各 2*N、WHERE IN 的 N、updated_at 的 1），按 sqliteVarLimit 限制批次大小。
+	const updateBatchSize = 50
+
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		for _, photoID := range dedupedIDs {
-			current, ok := byPhotoID[photoID]
-			updates := map[string]interface{}{
-				"face_count":          0,
-				"top_person_category": "",
+		for i := 0; i < len(dedupedIDs); i += updateBatchSize {
+			end := i + updateBatchSize
+			if end > len(dedupedIDs) {
+				end = len(dedupedIDs)
 			}
-			if ok {
-				updates["face_count"] = current.FaceCount
-				updates["top_person_category"] = personCategoryFromRank(current.CategoryRank)
+			batch := dedupedIDs[i:end]
+
+			// 占位符顺序与 SQL 一致：face_count 的 CASE → top_person_category 的 CASE
+			// → updated_at → WHERE IN，args 必须按同样顺序追加，避免错位。
+			faceCountParts := make([]string, 0, len(batch))
+			categoryParts := make([]string, 0, len(batch))
+			whereParts := make([]string, 0, len(batch))
+			args := make([]interface{}, 0, 5*len(batch)+1)
+
+			for _, photoID := range batch {
+				faceCount := 0
+				if current, ok := byPhotoID[photoID]; ok {
+					faceCount = current.FaceCount
+				}
+				faceCountParts = append(faceCountParts, "WHEN ? THEN ?")
+				args = append(args, photoID, faceCount)
+			}
+			for _, photoID := range batch {
+				category := ""
+				if current, ok := byPhotoID[photoID]; ok {
+					category = personCategoryFromRank(current.CategoryRank)
+				}
+				categoryParts = append(categoryParts, "WHEN ? THEN ?")
+				args = append(args, photoID, category)
+			}
+			args = append(args, time.Now()) // updated_at = ?
+			for _, photoID := range batch {
+				whereParts = append(whereParts, "?")
+				args = append(args, photoID) // WHERE id IN (...)
 			}
 
-			if err := tx.Model(&model.Photo{}).Where("id = ?", photoID).Updates(updates).Error; err != nil {
+			sql := "UPDATE photos SET face_count = CASE id " +
+				strings.Join(faceCountParts, " ") + " END, " +
+				"top_person_category = CASE id " + strings.Join(categoryParts, " ") + " END, " +
+				"updated_at = ? WHERE id IN (" + strings.Join(whereParts, ",") + ")"
+
+			if err := tx.Exec(sql, args...).Error; err != nil {
 				return err
 			}
 		}

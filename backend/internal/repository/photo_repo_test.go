@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -463,4 +464,263 @@ func TestPhotoRepositoryRecomputeTopPersonCategory(t *testing.T) {
 	updatedEmpty, err := photoRepo.GetByID(photos[2].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "", updatedEmpty.TopPersonCategory)
+}
+
+// TestPhotoRepositoryRecomputeTopPersonCategory_MultiBatch 覆盖跨批次批量更新：照片数
+// 超过单批次上限（50）时，分多条 SQL 写入且全部提交，结果与逐张逻辑一致。
+func TestPhotoRepositoryRecomputeTopPersonCategory_MultiBatch(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+
+	photoRepo := NewPhotoRepository(db)
+	personRepo := NewPersonRepository(db)
+	faceRepo := NewFaceRepository(db)
+
+	const total = 75 // 跨两个批次（50 + 25）
+	photos := make([]*model.Photo, 0, total)
+	for i := 0; i < total; i++ {
+		p := &model.Photo{
+			FilePath: fmt.Sprintf("/photos/%d.jpg", i),
+			FileName: fmt.Sprintf("%d.jpg", i), FileSize: 1, FileHash: fmt.Sprintf("h%d", i),
+			Width: 100, Height: 100,
+		}
+		require.NoError(t, photoRepo.Create(p))
+		photos = append(photos, p)
+	}
+
+	// 不同分类交替，验证 top_person_category 与 face_count 在各批次都正确。
+	categories := []string{
+		model.PersonCategoryFamily,
+		model.PersonCategoryFriend,
+		model.PersonCategoryAcquaintance,
+		model.PersonCategoryStranger,
+	}
+	persons := make([]*model.Person, len(categories))
+	for i, cat := range categories {
+		persons[i] = &model.Person{Category: cat}
+		require.NoError(t, personRepo.Create(persons[i]))
+	}
+	for i, p := range photos {
+		require.NoError(t, faceRepo.Create(&model.Face{
+			PhotoID: p.ID, PersonID: &persons[i%len(categories)].ID,
+			BBoxX: 0.1, BBoxY: 0.1, BBoxWidth: 0.2, BBoxHeight: 0.2,
+			Confidence: 0.9, QualityScore: 0.8,
+		}))
+		// 部分照片额外多一张同人物人脸，验证 face_count 聚合。
+		if i%2 == 0 {
+			require.NoError(t, faceRepo.Create(&model.Face{
+				PhotoID: p.ID, PersonID: &persons[i%len(categories)].ID,
+				BBoxX: 0.4, BBoxY: 0.1, BBoxWidth: 0.2, BBoxHeight: 0.2,
+				Confidence: 0.9, QualityScore: 0.8,
+			}))
+		}
+	}
+
+	before := make(map[uint]time.Time, len(photos))
+	for _, p := range photos {
+		got, err := photoRepo.GetByID(p.ID)
+		require.NoError(t, err)
+		before[p.ID] = got.UpdatedAt
+	}
+
+	allIDs := make([]uint, len(photos))
+	for i, p := range photos {
+		allIDs[i] = p.ID
+	}
+	require.NoError(t, photoRepo.RecomputeTopPersonCategory(allIDs))
+
+	for i, p := range photos {
+		got, err := photoRepo.GetByID(p.ID)
+		require.NoError(t, err)
+		expectedFaceCount := 1
+		if i%2 == 0 {
+			expectedFaceCount = 2
+		}
+		assert.Equal(t, expectedFaceCount, got.FaceCount, "photo %d face_count", i)
+		assert.Equal(t, categories[i%len(categories)], got.TopPersonCategory, "photo %d top_person_category", i)
+		assert.True(t, got.UpdatedAt.After(before[p.ID]), "photo %d updated_at should advance", i)
+	}
+}
+
+// TestPhotoRepositoryRecomputeTopPersonCategory_Rollback 验证事务性：当某个批次的
+// UPDATE 失败时，此前已执行的批次更新完整回滚，所有照片数据及 updated_at 不变。
+func TestPhotoRepositoryRecomputeTopPersonCategory_Rollback(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+
+	photoRepo := NewPhotoRepository(db)
+	personRepo := NewPersonRepository(db)
+	faceRepo := NewFaceRepository(db)
+
+	const total = 55 // 第一批 50 张，第二批 5 张
+	photos := make([]*model.Photo, 0, total)
+	for i := 0; i < total; i++ {
+		p := &model.Photo{
+			FilePath: fmt.Sprintf("/photos/r%d.jpg", i),
+			FileName: fmt.Sprintf("r%d.jpg", i), FileSize: 1, FileHash: fmt.Sprintf("rh%d", i),
+			Width: 100, Height: 100,
+		}
+		require.NoError(t, photoRepo.Create(p))
+		photos = append(photos, p)
+	}
+	person := &model.Person{Category: model.PersonCategoryFamily}
+	require.NoError(t, personRepo.Create(person))
+	for _, p := range photos {
+		require.NoError(t, faceRepo.Create(&model.Face{
+			PhotoID: p.ID, PersonID: &person.ID,
+			BBoxX: 0.1, BBoxY: 0.1, BBoxWidth: 0.2, BBoxHeight: 0.2,
+			Confidence: 0.9, QualityScore: 0.8,
+		}))
+	}
+
+	// 记录回滚前的快照。
+	snapshot := make(map[uint]*model.Photo, len(photos))
+	for _, p := range photos {
+		got, err := photoRepo.GetByID(p.ID)
+		require.NoError(t, err)
+		snapshot[p.ID] = got
+	}
+
+	// 在第二批首张照片（第 51 张）上挂一个触发器，使其 UPDATE 触发 ABORT，
+	// 迫使事务整体回滚（第一批 50 张的写入必须随之撤销）。SQLite 触发器不允许
+	// 使用绑定变量，因此直接内联整数 ID。
+	triggerPhotoID := photos[50].ID
+	triggerSQL := fmt.Sprintf(
+		`CREATE TRIGGER trg_recompute_rollback AFTER UPDATE ON photos `+
+			`WHEN NEW.id = %d BEGIN SELECT RAISE(ABORT, 'forced failure'); END`,
+		triggerPhotoID,
+	)
+	require.NoError(t, db.Exec(triggerSQL).Error)
+
+	allIDs := make([]uint, len(photos))
+	for i, p := range photos {
+		allIDs[i] = p.ID
+	}
+	err := photoRepo.RecomputeTopPersonCategory(allIDs)
+	require.Error(t, err)
+
+	// 回滚后：所有照片数据与快照一致，updated_at 未变。
+	for _, p := range photos {
+		got, err := photoRepo.GetByID(p.ID)
+		require.NoError(t, err)
+		snap := snapshot[p.ID]
+		assert.Equal(t, snap.FaceCount, got.FaceCount, "photo %d face_count should be rolled back", p.ID)
+		assert.Equal(t, snap.TopPersonCategory, got.TopPersonCategory, "photo %d top_person_category should be rolled back", p.ID)
+		assert.Equal(t, snap.UpdatedAt, got.UpdatedAt, "photo %d updated_at should be unchanged", p.ID)
+	}
+}
+
+// TestPhotoRepository_ListSummaries_NoTotal 验证 withTotal=false 时不执行 COUNT、total 恒为 0。
+func TestPhotoRepository_ListSummaries_NoTotal(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 15; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i%2 == 0,
+		}))
+	}
+
+	// withTotal=false：不统计总数
+	summaries, total, err := repo.ListSummaries(1, 10, nil, nil, nil, "", "", "", "", "id", false, nil, "", false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total, "withTotal=false should skip COUNT")
+	assert.Len(t, summaries, 10)
+
+	// withTotal=true：独立 COUNT 查询返回正确总数（不再使用 COUNT(*) OVER()）
+	summaries, total, err = repo.ListSummaries(1, 10, nil, nil, nil, "", "", "", "", "id", false, nil, "", true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), total)
+	assert.Len(t, summaries, 10)
+}
+
+// TestPhotoRepository_ListSummaries_WithTotal_Filtered 验证筛选条件下 withTotal 的独立 COUNT 正确。
+func TestPhotoRepository_ListSummaries_WithTotal_Filtered(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 4, // 4 张已分析
+		}))
+	}
+
+	analyzed := true
+	_, total, err := repo.ListSummaries(1, 10, &analyzed, nil, nil, "", "", "", "", "id", false, nil, "", true)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), total)
+}
+
+// TestPhotoRepository_CountWithFilters 验证按筛选条件独立 COUNT。
+func TestPhotoRepository_CountWithFilters(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1024,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 3, // 3 张已分析
+		}))
+	}
+
+	// 无筛选：全部 10 张
+	total, err := repo.CountWithFilters(nil, nil, nil, "", "", "", "", nil, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), total)
+
+	// 已分析筛选：3 张
+	analyzed := true
+	total, err = repo.CountWithFilters(&analyzed, nil, nil, "", "", "", "", nil, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	// 空路径数组：0
+	total, err = repo.CountWithFilters(nil, nil, nil, "", "", "", "", []string{}, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+}
+
+// TestPhotoRepository_GetPhotoStats 验证一次聚合查询返回总数/已分析/占用。
+func TestPhotoRepository_GetPhotoStats(t *testing.T) {
+	db := setupTestDB(t)
+	defer teardownTestDB(db)
+	repo := NewPhotoRepository(db)
+
+	for i := 0; i < 6; i++ {
+		require.NoError(t, repo.Create(&model.Photo{
+			FilePath:   fmt.Sprintf("/test/photos/IMG_%02d.jpg", i),
+			FileName:   fmt.Sprintf("IMG_%02d.jpg", i),
+			FileSize:   1000,
+			FileHash:   fmt.Sprintf("hash%02d", i),
+			Width:      1920,
+			Height:     1080,
+			AIAnalyzed: i < 2, // 2 张已分析
+		}))
+	}
+
+	total, analyzed, size, err := repo.GetPhotoStats()
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), total)
+	assert.Equal(t, int64(2), analyzed)
+	assert.Equal(t, int64(6000), size)
 }

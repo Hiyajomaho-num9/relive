@@ -267,11 +267,10 @@ func (s *displayService) ListDailyBatches(limit int) ([]*model.DailyDisplayBatch
 	if limit <= 0 {
 		limit = 30
 	}
+	// 历史列表仅返回批次摘要，不预加载 Items/Photo/Assets，
+	// 避免折叠批次立即触发约 limit*N 张预览图请求与 SQLite 全表关联。
 	var batches []*model.DailyDisplayBatch
 	err := s.db.
-		Preload("Items", func(db *gorm.DB) *gorm.DB { return db.Order("sequence ASC") }).
-		Preload("Items.Photo").
-		Preload("Items.Assets", func(db *gorm.DB) *gorm.DB { return db.Order("render_profile ASC") }).
 		Order("batch_date DESC").
 		Limit(limit).
 		Find(&batches).Error
@@ -282,6 +281,12 @@ func (s *displayService) ListDailyBatches(limit int) ([]*model.DailyDisplayBatch
 		batch.BatchDate = normalizeBatchDateString(batch.BatchDate)
 	}
 	return batches, nil
+}
+
+// GetDailyBatchByID 按批次 ID 加载完整批次详情（含 Items/Photo/Assets），
+// 供前端展开历史批次时按需加载。
+func (s *displayService) GetDailyBatchByID(id uint) (*model.DailyDisplayBatch, error) {
+	return loadDailyBatchByID(s.db, id)
 }
 
 func (s *displayService) GetDeviceDisplay(deviceID uint, renderProfile string) (*model.DeviceDisplaySelection, error) {

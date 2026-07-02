@@ -57,6 +57,10 @@ type AIService interface {
 	// ReAnalyzePhoto 重新分析照片（强制重新分析已分析的照片）
 	ReAnalyzePhoto(photoID uint) error
 
+	// AnalyzePhotoAsync 异步分析单张照片（同步预检 + 后台执行，立即返回）
+	// 预检错误同步返回；AI 分析在后台 goroutine 运行，结果落库后由前端轮询感知。
+	AnalyzePhotoAsync(photoID uint, force bool) error
+
 	// AnalyzeBatch 批量分析照片（异步启动）
 	AnalyzeBatch(limit int) (*AnalyzeTask, error)
 
@@ -70,7 +74,9 @@ type AIService interface {
 	GetBackgroundLogs() []string
 
 	// GetAnalyzeProgress 获取分析进度
-	GetAnalyzeProgress() (*model.AIAnalyzeProgressResponse, error)
+	// lite=true 时复用共享照片统计缓存，不再独立执行 3 次 COUNT 全表扫描，
+	// 用于 Dashboard 场景（总数/已分析数由 /system/stats 与本接口共享同一缓存）。
+	GetAnalyzeProgress(lite bool) (*model.AIAnalyzeProgressResponse, error)
 
 	// GetTaskStatus 获取任务状态
 	GetTaskStatus() *AnalyzeTask
@@ -556,31 +562,72 @@ func (s *aiService) ReAnalyzePhoto(photoID uint) error {
 	return s.analyzePhotoInternal(photoID, true)
 }
 
-// analyzePhotoInternal 内部分析方法
-// force: 是否强制重新分析已分析的照片
-func (s *aiService) analyzePhotoInternal(photoID uint, force bool) error {
+// AnalyzePhotoAsync 异步分析单张照片：同步预检后后台执行，立即返回。
+// 预检错误（provider 未配置、照片不存在/已排除/未就绪）同步返回；
+// AI 分析本身在后台 goroutine 中运行，结果写入数据库，由前端轮询感知。
+// 采用异步是为了避免单张分析耗时数分钟时，同步 HTTP 长连接被反向代理/网关切断（504）。
+func (s *aiService) AnalyzePhotoAsync(photoID uint, force bool) error {
+	photo, err := s.validatePhotoForAnalysis(photoID, force)
+	if err != nil {
+		return err
+	}
+	if photo == nil {
+		// 已分析且非强制，跳过
+		return nil
+	}
+	if force {
+		logger.Infof("Re-analyzing photo %d (force mode, async)", photoID)
+	} else {
+		logger.Infof("Analyzing photo %d (async)", photoID)
+	}
+	go func() {
+		if err := s.analyzePhotoInternal(photoID, force); err != nil {
+			logger.Errorf("Async analyze photo %d failed: %v", photoID, err)
+		}
+	}()
+	return nil
+}
+
+// validatePhotoForAnalysis 同步预检照片是否可分析：provider 已配置、照片存在、未排除、就绪。
+// 返回 (nil, nil) 表示「已分析且非强制」需跳过，不视为错误。
+func (s *aiService) validatePhotoForAnalysis(photoID uint, force bool) (*model.Photo, error) {
 	if s.provider == nil {
-		return fmt.Errorf("AI provider not configured")
+		return nil, fmt.Errorf("AI provider not configured")
 	}
 
 	// 获取照片信息
 	photo, err := s.photoRepo.GetByID(photoID)
 	if err != nil {
-		return fmt.Errorf("get photo: %w", err)
+		return nil, fmt.Errorf("get photo: %w", err)
 	}
 
 	if photo.Status == model.PhotoStatusExcluded {
-		return fmt.Errorf("photo %d is excluded", photoID)
+		return nil, fmt.Errorf("photo %d is excluded", photoID)
 	}
 
 	// 检查是否已分析（非强制模式下跳过已分析的照片）
 	if photo.AIAnalyzed && !force {
 		logger.Warnf("Photo %d already analyzed, skipping", photoID)
-		return nil
+		return nil, nil
 	}
 
 	if !isPhotoReadyForAI(photo) {
-		return fmt.Errorf("photo %d is not ready for ai analysis: %s", photoID, photoNotReadyReason(photo))
+		return nil, fmt.Errorf("photo %d is not ready for ai analysis: %s", photoID, photoNotReadyReason(photo))
+	}
+
+	return photo, nil
+}
+
+// analyzePhotoInternal 内部分析方法
+// force: 是否强制重新分析已分析的照片
+func (s *aiService) analyzePhotoInternal(photoID uint, force bool) error {
+	photo, err := s.validatePhotoForAnalysis(photoID, force)
+	if err != nil {
+		return err
+	}
+	if photo == nil {
+		// 已分析且非强制，跳过
+		return nil
 	}
 
 	// 获取图片数据（优先使用缩略图）
@@ -1293,24 +1340,43 @@ func (s *aiService) analyzeInBatchesAsync(task *AnalyzeTask, photos []*model.Pho
 	return successCount, failedCount, totalCost
 }
 
-// GetAnalyzeProgress 获取分析进度
-func (s *aiService) GetAnalyzeProgress() (*model.AIAnalyzeProgressResponse, error) {
-	// 统计总数
-	total, err := s.photoRepo.Count()
-	if err != nil {
-		return nil, fmt.Errorf("count total: %w", err)
-	}
+// GetAnalyzeProgress 获取分析进度。
+// lite=true 时复用 /system/stats 的共享照片统计缓存，跳过独立的 COUNT 全表扫描；
+// lite=false 时保持原有行为（独立统计总数/已分析/未分析），向后兼容。
+func (s *aiService) GetAnalyzeProgress(lite bool) (*model.AIAnalyzeProgressResponse, error) {
+	var total, analyzed, unanalyzed int64
 
-	// 统计已分析数
-	analyzed, err := s.photoRepo.CountAnalyzed()
-	if err != nil {
-		return nil, fmt.Errorf("count analyzed: %w", err)
-	}
-
-	// 统计未分析数
-	unanalyzed, err := s.photoRepo.CountUnanalyzed()
-	if err != nil {
-		return nil, fmt.Errorf("count unanalyzed: %w", err)
+	if lite {
+		snap, err := sharedPhotoStatsCache.get(func() (photoStatsSnapshot, error) {
+			t, a, size, err := s.photoRepo.GetPhotoStats()
+			if err != nil {
+				return photoStatsSnapshot{}, err
+			}
+			return photoStatsSnapshot{Total: t, Analyzed: a, Unanalyzed: t - a, Size: size}, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load photo stats: %w", err)
+		}
+		total, analyzed, unanalyzed = snap.Total, snap.Analyzed, snap.Unanalyzed
+	} else {
+		// 统计总数
+		t, err := s.photoRepo.Count()
+		if err != nil {
+			return nil, fmt.Errorf("count total: %w", err)
+		}
+		total = t
+		// 统计已分析数
+		a, err := s.photoRepo.CountAnalyzed()
+		if err != nil {
+			return nil, fmt.Errorf("count analyzed: %w", err)
+		}
+		analyzed = a
+		// 统计未分析数
+		u, err := s.photoRepo.CountUnanalyzed()
+		if err != nil {
+			return nil, fmt.Errorf("count unanalyzed: %w", err)
+		}
+		unanalyzed = u
 	}
 
 	// 计算进度百分比

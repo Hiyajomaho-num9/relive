@@ -32,6 +32,7 @@ type DisplayService interface {
 	StartGenerateDailyBatch(date time.Time, force bool) (*model.DailyDisplayBatch, error)
 	GetDailyBatch(date time.Time) (*model.DailyDisplayBatch, error)
 	ListDailyBatches(limit int) ([]*model.DailyDisplayBatch, error)
+	GetDailyBatchByID(id uint) (*model.DailyDisplayBatch, error)
 	GetDeviceDisplay(deviceID uint, renderProfile string) (*model.DeviceDisplaySelection, error)
 	GetDailyDisplayItem(id uint) (*model.DailyDisplayItem, error)
 	GetDailyDisplayAsset(id uint) (*model.DailyDisplayAsset, error)

@@ -78,8 +78,8 @@ func (h *AIHandler) Analyze(c *gin.Context) {
 		return
 	}
 
-	// 分析照片
-	if err := svc.AnalyzePhoto(req.PhotoID); err != nil {
+	// 异步分析照片（预检同步返回，AI 分析在后台执行；避免长连接被反向代理切断）
+	if err := svc.AnalyzePhotoAsync(req.PhotoID, false); err != nil {
 		logger.Errorf("Analyze photo failed: %v", err)
 		c.JSON(http.StatusInternalServerError, model.Response{
 			Success: false,
@@ -93,7 +93,7 @@ func (h *AIHandler) Analyze(c *gin.Context) {
 
 	c.JSON(http.StatusOK, model.Response{
 		Success: true,
-		Message: "Photo analyzed successfully",
+		Message: "Photo analysis started",
 	})
 }
 
@@ -287,7 +287,10 @@ func (h *AIHandler) GetProgress(c *gin.Context) {
 	}
 
 	// 获取总体进度
-	progress, err := svc.GetAnalyzeProgress()
+	// Dashboard 场景传入 lite=true，复用 /system/stats 的共享照片统计缓存，
+	// 不再独立执行 COUNT 全表扫描；其他调用方保持默认行为。
+	lite := c.Query("lite") == "true"
+	progress, err := svc.GetAnalyzeProgress(lite)
 	if err != nil {
 		logger.Errorf("Get progress failed: %v", err)
 		c.JSON(http.StatusInternalServerError, model.Response{
@@ -411,8 +414,8 @@ func (h *AIHandler) ReAnalyze(c *gin.Context) {
 		return
 	}
 
-	// 重新分析（强制重新分析已分析的照片）
-	if err := svc.ReAnalyzePhoto(uint(id)); err != nil {
+	// 异步重新分析（预检同步返回，AI 分析在后台执行；避免长连接被反向代理切断）
+	if err := svc.AnalyzePhotoAsync(uint(id), true); err != nil {
 		logger.Errorf("Re-analyze photo failed: %v", err)
 		c.JSON(http.StatusInternalServerError, model.Response{
 			Success: false,
@@ -426,7 +429,7 @@ func (h *AIHandler) ReAnalyze(c *gin.Context) {
 
 	c.JSON(http.StatusOK, model.Response{
 		Success: true,
-		Message: "Photo re-analyzed successfully",
+		Message: "Photo re-analysis started",
 	})
 }
 

@@ -367,8 +367,9 @@ func (h *PhotoHandler) GetPhotos(c *gin.Context) {
 	tag := c.Query("tag")
 	sortBy := c.DefaultQuery("sort_by", "taken_at")
 	sortDesc := c.DefaultQuery("sort_desc", "true") == "true"
-	status := c.Query("status") // active(默认)/excluded/all
-	view := c.Query("view")     // summary(默认)/full
+	status := c.Query("status")     // active(默认)/excluded/all
+	view := c.Query("view")         // summary(默认)/full
+	noTotal := c.Query("no_total") == "true" // 不统计总数（Dashboard 最近照片）
 
 	// 构建请求
 	req := &model.GetPhotosRequest{
@@ -384,6 +385,7 @@ func (h *PhotoHandler) GetPhotos(c *gin.Context) {
 		SortBy:       sortBy,
 		SortDesc:     sortDesc,
 		Status:       status,
+		NoTotal:      noTotal,
 	}
 
 	var items interface{}
@@ -1099,6 +1101,32 @@ func (h *PhotoHandler) GetTags(c *gin.Context) {
 		Success: true,
 		Message: "Success",
 		Data:    model.TagsResponse{Items: tags, Total: total},
+	})
+}
+
+// RebuildTagStats 全量重建标签统计表
+// @Summary 重建标签统计
+// @Description 从 photo_tags 全量重建 photo_tag_stats 预聚合统计表，用于修复历史数据或异常漂移
+// @Tags photos
+// @Produce json
+// @Success 200 {object} model.Response
+// @Failure 500 {object} model.Response
+// @Router /api/v1/photos/tags/rebuild [post]
+func (h *PhotoHandler) RebuildTagStats(c *gin.Context) {
+	if err := h.photoService.RebuildTagStats(); err != nil {
+		logger.Errorf("Rebuild tag stats failed: %v", err)
+		c.JSON(http.StatusInternalServerError, model.Response{
+			Success: false,
+			Error: &model.ErrorInfo{
+				Code:    "REBUILD_FAILED",
+				Message: "Failed to rebuild tag stats",
+			},
+		})
+		return
+	}
+	c.JSON(http.StatusOK, model.Response{
+		Success: true,
+		Message: "Tag stats rebuilt",
 	})
 }
 

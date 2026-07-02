@@ -12,7 +12,8 @@ import type {
   PersonMergeSuggestion,
   PersonMergeSuggestionStats,
   PersonMergeSuggestionTask,
-  PhotoPeopleResponse
+  PhotoPeopleResponse,
+  UpdateVisibilityResult,
 } from '@/types/people'
 
 export const peopleApi = {
@@ -48,6 +49,13 @@ export const peopleApi = {
     return http.post<ApiResponse<{ job_id: number; status: string }>>('/people/merge', {
       target_person_id: targetPersonId,
       source_person_ids: sourcePersonIds,
+    })
+  },
+
+  updateVisibility(personIds: number[], hidden: boolean) {
+    return http.patch<ApiResponse<UpdateVisibilityResult>>('/people/visibility', {
+      person_ids: personIds,
+      hidden,
     })
   },
 

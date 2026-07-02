@@ -1,6 +1,9 @@
 package model
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // PhotoTag 照片标签独立表
 type PhotoTag struct {
@@ -11,6 +14,19 @@ type PhotoTag struct {
 
 func (PhotoTag) TableName() string {
 	return "photo_tags"
+}
+
+// PhotoTagStats 标签统计预聚合表（每标签一行）。
+// 用于替代热门标签查询的实时 GROUP BY / COUNT(DISTINCT)，
+// 由 photo_tags 的写入路径在同一事务内增量维护。
+type PhotoTagStats struct {
+	Tag        string    `gorm:"type:varchar(100);primaryKey" json:"tag"`
+	PhotoCount int64     `gorm:"not null;default:0" json:"photo_count"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (PhotoTagStats) TableName() string {
+	return "photo_tag_stats"
 }
 
 // SplitTags 将逗号分隔的标签字符串拆分为去重的切片

@@ -44,7 +44,10 @@ func (c *fakePeopleMLClient) DetectFaces(ctx context.Context, req mlclient.Detec
 func setupPeopleServiceTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{Logger: gormlogger.Discard})
+	// _busy_timeout matches production (pkg/database): without it, concurrent
+	// writes from the background goroutine, the clustering coordinator worker
+	// and the test goroutine hit "database table is locked" under -race.
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=60000"), &gorm.Config{Logger: gormlogger.Discard})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -98,6 +101,10 @@ func newPeopleServiceForTest(t *testing.T, client PeopleMLClient) (*peopleServic
 	// Reset clustering task counter to ensure clustering runs on first job
 	// This is needed because tests expect immediate clustering behavior
 	svc.clusteringTaskCounter = peopleClusteringTaskInterval
+
+	t.Cleanup(func() {
+		svc.clusteringCoordinator.stop()
+	})
 
 	return svc, db
 }
@@ -1352,7 +1359,7 @@ func TestPhotoScanStartsPeopleBackground(t *testing.T) {
 	cfg.People.MLEndpoint = "http://ml-service"
 	cfg.People.Timeout = 5
 
-	photoSvc := NewPhotoService(photoRepo, repository.NewPhotoTagRepository(db), scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
+	photoSvc := NewPhotoService(photoRepo, repository.NewPhotoTagRepository(db), db, scanJobRepo, cfg, configService, nil, nil, nil).(*photoService)
 	peopleSvc := NewPeopleService(
 		db,
 		photoRepo,
@@ -2118,7 +2125,6 @@ func TestPeopleService_MergePeopleSchedulesFeedbackReclusterAsync(t *testing.T) 
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
 
@@ -2172,7 +2178,6 @@ func TestPeopleService_MergePeopleSchedulesFeedbackReclusterAsync(t *testing.T) 
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		select {
 		case started <- struct{}{}:
@@ -2225,7 +2230,6 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2236,7 +2240,6 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	var runs atomic.Int32
 	firstRunStarted := make(chan struct{}, 1)
 	releaseFirstRun := make(chan struct{})
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		run := runs.Add(1)
@@ -2277,12 +2280,11 @@ func TestPeopleService_FeedbackReclusterCoalescesRequests(t *testing.T) {
 	assert.Equal(t, int32(2), runs.Load())
 }
 
-func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.T) {
+func TestPeopleService_FeedbackReclusterNotDeferredByBackgroundBusy(t *testing.T) {
 	svc, _ := newPeopleServiceForTest(t, &fakePeopleMLClient{})
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2291,7 +2293,6 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 	require.True(t, ok, "expected async feedback recluster hooks to be available")
 
 	var runs atomic.Int32
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
@@ -2301,17 +2302,18 @@ func TestPeopleService_FeedbackReclusterDefersWhileBackgroundRunning(t *testing.
 		hooks.setFeedbackReclusterHookForTest(nil)
 	})
 
+	// Under the coordinator, background and feedback are serialized through a
+	// single worker and feedback has priority. The legacy backgroundBusy flag
+	// no longer defers feedback, so a scheduled feedback runs even while
+	// backgroundBusy is set (no actual background batch is in flight here).
 	svc.setBackgroundBusy(true)
 
 	hooks.scheduleFeedbackRecluster()
-	time.Sleep(40 * time.Millisecond)
-	assert.Zero(t, runs.Load())
-
-	svc.setBackgroundBusy(false)
-
 	waitForPeopleCondition(t, time.Second, func() bool {
 		return runs.Load() == 1
 	})
+
+	svc.setBackgroundBusy(false)
 }
 
 func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T) {
@@ -2319,7 +2321,6 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 
 	type feedbackSchedulerTestHooks interface {
 		setFeedbackReclusterHookForTest(func() model.ReclusterResult)
-		setFeedbackReclusterPollIntervalForTest(time.Duration)
 		setFeedbackCooldownForTest(time.Duration)
 		scheduleFeedbackRecluster()
 	}
@@ -2328,7 +2329,6 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 	require.True(t, ok, "expected async feedback recluster hooks to be available")
 
 	var runs atomic.Int32
-	hooks.setFeedbackReclusterPollIntervalForTest(5 * time.Millisecond)
 	hooks.setFeedbackCooldownForTest(5 * time.Millisecond)
 	hooks.setFeedbackReclusterHookForTest(func() model.ReclusterResult {
 		runs.Add(1)
@@ -2339,15 +2339,19 @@ func TestPeopleService_HandleShutdownStopsPendingFeedbackRecluster(t *testing.T)
 		svc.setBackgroundBusy(false)
 	})
 
-	svc.setBackgroundBusy(true)
 	hooks.scheduleFeedbackRecluster()
-	time.Sleep(30 * time.Millisecond)
+	waitForPeopleCondition(t, time.Second, func() bool {
+		return runs.Load() == 1
+	})
 
+	// Shutdown stops the coordinator worker (HandleShutdown blocks until the
+	// worker goroutine has exited) and rejects any further clustering requests.
 	require.NoError(t, svc.HandleShutdown())
 
-	svc.setBackgroundBusy(false)
+	// Scheduling after shutdown must be a no-op: no additional feedback run.
+	hooks.scheduleFeedbackRecluster()
 	time.Sleep(50 * time.Millisecond)
-	assert.Zero(t, runs.Load())
+	assert.Equal(t, int32(1), runs.Load())
 }
 
 func TestPeopleServiceCategoryBackfillsPhotos(t *testing.T) {
@@ -3029,4 +3033,64 @@ func TestAttachComponentWithANNCandidateFn_NilFnMeansFullScan(t *testing.T) {
 
 	assert.True(t, attached)
 	assert.Equal(t, uint(1), personID)
+}
+
+// TestPeopleService_GetStats_DetectedPhotosStableAfterJobCleanup 验证清理终态 people_jobs
+// 前后，“已检测照片数”（DetectedPhotos）保持一致——它来自照片 face_process_status，
+// 不依赖 people_jobs 任务明细。
+func TestPeopleService_GetStats_DetectedPhotosStableAfterJobCleanup(t *testing.T) {
+	svc, db := newPeopleServiceForTest(t, &fakePeopleMLClient{})
+	jobRepo := svc.jobRepo
+
+	// 3 张已检测照片（ready），2 张待检测（none）
+	require.NoError(t, db.Create(&model.Photo{FilePath: "/a.jpg", Status: model.PhotoStatusActive, FaceProcessStatus: model.FaceProcessStatusReady}).Error)
+	require.NoError(t, db.Create(&model.Photo{FilePath: "/b.jpg", Status: model.PhotoStatusActive, FaceProcessStatus: model.FaceProcessStatusNoFace}).Error)
+	require.NoError(t, db.Create(&model.Photo{FilePath: "/c.jpg", Status: model.PhotoStatusActive, FaceProcessStatus: model.FaceProcessStatusFailed}).Error)
+	require.NoError(t, db.Create(&model.Photo{FilePath: "/d.jpg", Status: model.PhotoStatusActive, FaceProcessStatus: model.FaceProcessStatusNone}).Error)
+	require.NoError(t, db.Create(&model.Photo{FilePath: "/e.jpg", Status: model.PhotoStatusActive, FaceProcessStatus: model.FaceProcessStatusNone}).Error)
+
+	// 对应 3 条已完成人物任务（模拟历史终态记录）
+	now := time.Now()
+	old := now.Add(-8 * 24 * time.Hour)
+	for i, pid := range []uint{1, 2, 3} {
+		j := &model.PeopleJob{
+			PhotoID:  pid,
+			FilePath: "/x.jpg",
+			Status:   model.PeopleJobStatusCompleted,
+			Source:   model.PeopleJobSourceScan,
+			QueuedAt: old,
+		}
+		require.NoError(t, jobRepo.Create(j))
+		require.NoError(t, db.Exec("UPDATE people_jobs SET updated_at = ? WHERE id = ?", old, j.ID).Error)
+		_ = i
+	}
+
+	// 清理前
+	svc.invalidateStatsCache()
+	before, err := svc.GetStats()
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), before.DetectedPhotos, "已检测照片数应为 3")
+	assert.Equal(t, int64(2), before.PendingPhotos, "待检测照片数应为 2")
+	beforeCompleted := before.Completed
+
+	// 执行清理：删除 7 天前的终态任务
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for {
+		ids, err := jobRepo.ListTerminalIDsBefore(cutoff, 10)
+		require.NoError(t, err)
+		if len(ids) == 0 {
+			break
+		}
+		_, err = jobRepo.DeleteByIDs(ids)
+		require.NoError(t, err)
+	}
+
+	// 清理后
+	svc.invalidateStatsCache()
+	after, err := svc.GetStats()
+	require.NoError(t, err)
+	assert.Equal(t, before.DetectedPhotos, after.DetectedPhotos, "清理后已检测照片数必须保持一致")
+	assert.Equal(t, before.PendingPhotos, after.PendingPhotos, "清理后待检测照片数必须保持一致")
+	assert.Less(t, after.Completed, beforeCompleted, "任务明细 completed 应随清理减少（保留期内数据）")
+	assert.Equal(t, int64(0), after.Completed, "历史终态任务应已被清理")
 }

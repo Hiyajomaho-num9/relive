@@ -9,6 +9,7 @@ import (
 	"github.com/davidhoo/relive/pkg/config"
 	"github.com/davidhoo/relive/pkg/logger"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestMain(m *testing.M) {
@@ -29,6 +30,7 @@ func (r *stubPhotoRepo) Create(photo *model.Photo) error                        
 func (r *stubPhotoRepo) Update(photo *model.Photo) error                           { return nil }
 func (r *stubPhotoRepo) UpdateFields(id uint, fields map[string]interface{}) error { return nil }
 func (r *stubPhotoRepo) Delete(id uint) error                                      { return nil }
+func (r *stubPhotoRepo) DeleteTx(tx *gorm.DB, id uint) error                      { return nil }
 func (r *stubPhotoRepo) GetByID(id uint) (*model.Photo, error)                     { return nil, nil }
 func (r *stubPhotoRepo) GetByFilePath(filePath string) (*model.Photo, error)       { return nil, nil }
 func (r *stubPhotoRepo) GetByFileHash(fileHash string) (*model.Photo, error)       { return nil, nil }
@@ -107,6 +109,9 @@ func (r *stubPhotoRepo) GetScatteredHighQuality(minBeauty int, excludeIDs []uint
 	return nil, nil
 }
 func (r *stubPhotoRepo) ListByFaceStatus(status string) ([]*model.Photo, error) { return nil, nil }
+func (r *stubPhotoRepo) CountActiveByFaceProcessStatuses(statuses []string) (int64, error) {
+	return 0, nil
+}
 func (r *stubPhotoRepo) ListPhotosByPersonID(personID uint) ([]*model.Photo, error) {
 	return nil, nil
 }
@@ -116,8 +121,16 @@ func (r *stubPhotoRepo) ListPhotoSummariesByPersonID(personID uint) ([]*model.Ph
 func (r *stubPhotoRepo) ListPhotoSummariesByPersonIDPaginated(personID uint, page, pageSize int) ([]*model.Photo, int64, error) {
 	return nil, 0, nil
 }
-func (r *stubPhotoRepo) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string) ([]*model.PhotoSummary, int64, error) {
+func (r *stubPhotoRepo) ListSummaries(page, pageSize int, analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, sortBy string, sortDesc bool, enabledPaths []string, status string, withTotal bool) ([]*model.PhotoSummary, int64, error) {
 	return nil, 0, nil
+}
+
+func (r *stubPhotoRepo) CountWithFilters(analyzed *bool, hasThumbnail *bool, hasGPS *bool, location string, search string, category string, tag string, enabledPaths []string, status string) (int64, error) {
+	return 0, nil
+}
+
+func (r *stubPhotoRepo) GetPhotoStats() (total, analyzed, size int64, err error) {
+	return 0, 0, 0, nil
 }
 
 func TestNormalizeDisplayStrategyConfig_MergesSmartIntoOnThisDay(t *testing.T) {

@@ -677,47 +677,53 @@ const handleThumbnail = async () => {
   }
 }
 
-// AI 分析/重新分析
+// AI 分析/重新分析（后端异步入队，POST 立即返回；前端轮询直到完成）
 const handleAnalyze = async () => {
   if (!photo.value) return
 
   const isReanalyze = photo.value.ai_analyzed
+  // 记录当前分析时间，用于重新分析时检测 analyzed_at 变化
+  const lastAnalyzedAt = photo.value.analyzed_at
   try {
     analyzing.value = true
 
-    // 根据是否已分析调用不同 API
+    // 后端异步启动分析，POST 立即返回；AI 分析在后台运行（耗时数分钟），
+    // 避免同步长连接被反向代理/网关 60s 超时切断（504）
     if (isReanalyze) {
       await aiApi.reAnalyze(photo.value.id)
-      ElMessage.success('重新分析请求已提交')
     } else {
       await aiApi.analyze(photo.value.id)
-      ElMessage.success('分析请求已提交')
     }
 
-    // 记录当前分析时间用于检测变化
-    const lastAnalyzedAt = photo.value.analyzed_at
-
-    // 轮询结果
+    // 轮询检测分析完成：首次分析看 ai_analyzed 变 true；重新分析看 analyzed_at 变化
+    const POLL_INTERVAL = 2000
+    const POLL_TIMEOUT = 300000 // 5 分钟（后端单会话上限 120s × 2 + 余量）
+    const startedAt = Date.now()
     const timer = addTimer(setInterval(async () => {
-      await loadPhoto()
-      // 首次分析：检测 ai_analyzed 变为 true
-      // 重新分析：检测 analyzed_at 时间变化
+      // 轻量轮询：只取照片字段，避免每次都拉人物信息
+      try {
+        const res = await photoApi.getById(photo.value!.id)
+        const p = res.data?.data
+        if (p) photo.value = p
+      } catch {
+        return
+      }
       const completed = !isReanalyze
         ? photo.value?.ai_analyzed
         : (photo.value?.analyzed_at && photo.value.analyzed_at !== lastAnalyzedAt)
-
       if (completed) {
         clearInterval(timer)
         analyzing.value = false
-        ElMessage.success('分析完成')
+        // 完成后完整刷新（含人物信息）
+        await loadPhoto()
+        ElMessage.success(isReanalyze ? '重新分析完成' : '分析完成')
+      } else if (Date.now() - startedAt > POLL_TIMEOUT) {
+        clearInterval(timer)
+        analyzing.value = false
+        ElMessage.warning('分析仍在进行，请稍后返回查看结果')
       }
-    }, 2000))
-
-    // 60秒超时（重新分析可能需要更长时间）
-    addTimer(setTimeout(() => {
-      clearInterval(timer)
-      analyzing.value = false
-    }, 60000))
+    }, POLL_INTERVAL))
+    // timer 已通过 addTimer 注册，组件卸载时由 clearAllTimers 统一清理
   } catch (error: any) {
     analyzing.value = false
     // 特殊处理 AI 服务未配置的情况
@@ -727,7 +733,7 @@ const handleAnalyze = async () => {
         duration: 5000
       })
     } else {
-      ElMessage.error(error.message || '分析失败')
+      ElMessage.error(error.response?.data?.error?.message || error.message || '分析失败')
     }
   }
 }

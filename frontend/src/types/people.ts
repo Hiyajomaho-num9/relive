@@ -1,5 +1,6 @@
 export type PersonCategory = 'family' | 'friend' | 'acquaintance' | 'stranger'
 export type FaceProcessStatus = 'none' | 'pending' | 'processing' | 'ready' | 'no_face' | 'failed'
+export type PeopleVisibility = 'visible' | 'hidden' | 'all'
 
 export interface Face {
   id: number
@@ -29,6 +30,7 @@ export interface Person {
   avatar_locked?: boolean
   face_count: number
   photo_count: number
+  hidden: boolean
   created_at: string
   updated_at: string
   faces?: Face[]
@@ -40,6 +42,14 @@ export interface PeopleListParams {
   category?: PersonCategory
   search?: string
   has_avatar?: string // 'true' 只返回有头像的人物
+  visibility?: PeopleVisibility
+}
+
+export interface UpdateVisibilityResult {
+  updated: number
+  requested: number
+  hidden: boolean
+  missing_count: number
 }
 
 export interface PeopleTask {
@@ -64,6 +74,10 @@ export interface PeopleStats {
   pending_faces_never_clustered: number
   pending_faces_retried: number
   total_faces: number
+  // 已检测照片数（按照片当前 face_process_status 计算，独立于任务明细）
+  detected_photos: number
+  // 待检测照片数（face_process_status 为 none/pending/processing 的活跃照片）
+  pending_photos: number
 }
 
 export interface PeopleBackgroundLogsResponse {
